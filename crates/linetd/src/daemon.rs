@@ -14,6 +14,7 @@ use linet_core::tls::{self, ClientPolicy};
 use linet_core::{Envelope, Fingerprint, Hello, Identity, Message, PeerRecord, PeerStore, Session, frame};
 use tokio::sync::watch;
 
+use crate::clipboard::Clipboard;
 use crate::mirror::Mirror;
 
 pub const PAIRING_WINDOW: Duration = Duration::from_secs(120);
@@ -35,6 +36,7 @@ pub struct Daemon {
     transfers: Arc<Transfers>,
     /// Появляется после подключения к D-Bus.
     mirror: OnceLock<Arc<Mirror>>,
+    clipboard: Option<Arc<Clipboard>>,
     /// Счётчик изменений списка устройств — для D-Bus-сигнала.
     changed: watch::Sender<u64>,
 }
@@ -47,7 +49,14 @@ pub struct DeviceInfo {
 }
 
 impl Daemon {
-    pub fn new(identity: Identity, store: PeerStore, hello: Hello, port: u16, transfers: Arc<Transfers>) -> Arc<Self> {
+    pub fn new(
+        identity: Identity,
+        store: PeerStore,
+        hello: Hello,
+        port: u16,
+        transfers: Arc<Transfers>,
+        clipboard: Option<Arc<Clipboard>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             identity,
             hello,
@@ -57,6 +66,7 @@ impl Daemon {
             sessions: Mutex::new(HashMap::new()),
             transfers,
             mirror: OnceLock::new(),
+            clipboard,
             changed: watch::channel(0).0,
         })
     }
@@ -71,6 +81,16 @@ impl Daemon {
 
     pub fn set_mirror(&self, mirror: Arc<Mirror>) {
         let _ = self.mirror.set(mirror);
+    }
+
+    /// Отправить сообщение всем подключённым устройствам.
+    pub async fn broadcast(&self, msg: Message) {
+        let sessions: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
+        for s in sessions {
+            if let Err(e) = s.send(msg.clone()).await {
+                tracing::debug!(name = %s.hello().name, "рассылка: {e:#}");
+            }
+        }
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
@@ -256,9 +276,16 @@ impl Daemon {
 
         while let Some(inbound) = events.recv().await {
             let Some(env) = self.transfers.handle(&session, inbound) else { continue };
-            let rest = match self.mirror.get() {
-                Some(mirror) => mirror.handle(&session, env.body).await,
-                None => Some(env.body),
+            let rest = match (env.body, &self.clipboard) {
+                (Message::Clipboard { text }, Some(clipboard)) => {
+                    tracing::debug!(len = text.len(), "буфер обмена с телефона");
+                    clipboard.set(text).await;
+                    None
+                }
+                (body, _) => match self.mirror.get() {
+                    Some(mirror) => mirror.handle(&session, body).await,
+                    None => Some(body),
+                },
             };
             if let Some(msg) = rest {
                 tracing::debug!(name = %session.hello().name, "необработанное сообщение: {msg:?}");

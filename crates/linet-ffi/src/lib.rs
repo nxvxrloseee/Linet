@@ -129,6 +129,8 @@ pub trait EventListener: Send + Sync {
     fn on_notification_action(&self, key: String, action: u32, reply: Option<String>);
     /// На ноутбуке смахнули уведомление.
     fn on_notification_dismiss(&self, key: String);
+    /// На ноутбуке скопировали текст.
+    fn on_clipboard(&self, text: String);
 }
 
 #[derive(uniffi::Object)]
@@ -186,7 +188,7 @@ impl LinetClient {
             name: device_name,
             kind: DeviceKind::Phone,
             proto: linet_core::PROTO_VERSION,
-            caps: vec!["ping".into(), "files".into(), "notifications".into()],
+            caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into()],
         };
         let progress = listener.clone();
         let transfers = Transfers::new(PathBuf::from(inbox_dir), Arc::new(move |u| progress.on_transfer(u.into())));
@@ -207,6 +209,7 @@ impl LinetClient {
                                 listener.on_notification_action(key, action, reply)
                             }
                             Message::NotificationDismiss { key } => listener.on_notification_dismiss(key),
+                            Message::Clipboard { text } => listener.on_clipboard(text),
                             other => tracing::debug!("сообщение: {other:?}"),
                         }
                         continue;
@@ -271,6 +274,13 @@ impl LinetClient {
 
     pub fn remove_notification(&self, key: String) {
         self.send_quietly(Message::NotificationRemoved { key });
+    }
+
+    /// Отправить текст в буфер обмена ноутбука. `false` — нет соединения.
+    pub fn send_clipboard(&self, text: String) -> bool {
+        let connected = self.client.session().is_some();
+        self.send_quietly(Message::Clipboard { text });
+        connected
     }
 
     /// Время отклика ноутбука в миллисекундах.

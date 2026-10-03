@@ -94,6 +94,8 @@ pub enum Message {
     NotificationAction { key: String, action: u32, reply: Option<String> },
     /// Ноутбук → телефон: пользователь закрыл уведомление на ноутбуке.
     NotificationDismiss { key: String },
+    /// Новое содержимое буфера обмена (только текст).
+    Clipboard { text: String },
     #[serde(other)]
     Unknown,
 }

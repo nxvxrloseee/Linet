@@ -12,6 +12,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -164,9 +165,12 @@ private fun PeerCard(name: String, connected: Boolean, detail: String?) {
             if (!connected && detail != null) {
                 Text(detail, style = MaterialTheme.typography.bodySmall)
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (connected) {
                     Button(onClick = { pickFiles.launch(arrayOf("*/*")) }) { Text("Файл") }
+                    OutlinedButton(onClick = { ClipboardSync.sendCurrent(context as android.app.Activity) }) {
+                        Text("Буфер")
+                    }
                     OutlinedButton(onClick = {
                         scope.launch {
                             info = io { Linet.client(context).ping() }

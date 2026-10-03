@@ -66,6 +66,10 @@ object Linet {
             NotifyListener.onDismiss(key)
         }
 
+        override fun onClipboard(text: String) {
+            ClipboardSync.apply(context, text)
+        }
+
         override fun onTransfer(transfer: TransferInfo) = Transfers.onUpdate(context, transfer)
     }
 }

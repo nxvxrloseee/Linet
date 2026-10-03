@@ -1,3 +1,4 @@
+mod clipboard;
 mod daemon;
 mod dbus;
 mod mirror;
@@ -31,6 +32,9 @@ struct Args {
     /// Не анонсировать себя по mDNS
     #[arg(long)]
     no_mdns: bool,
+    /// Не синхронизировать буфер обмена
+    #[arg(long)]
+    no_clipboard: bool,
 }
 
 fn hostname() -> String {
@@ -89,13 +93,21 @@ async fn main() -> Result<()> {
         name: name.clone(),
         kind: DeviceKind::Laptop,
         proto: linet_core::PROTO_VERSION,
-        caps: vec!["ping".into(), "files".into(), "notifications".into()],
+        caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into()],
     };
     let id = identity.fingerprint().device_id();
     let (updates_tx, updates_rx) = tokio::sync::mpsc::unbounded_channel();
     let inbox = downloads_dir()?.join("Linet");
     let transfers = Transfers::new(inbox, Arc::new(move |u| drop(updates_tx.send(u))));
-    let daemon = Daemon::new(identity, store, hello, args.port, transfers);
+    let clipboard = (!args.no_clipboard).then(clipboard::Clipboard::new);
+    let daemon = Daemon::new(identity, store, hello, args.port, transfers, clipboard.clone());
+    if let Some(clipboard) = clipboard {
+        let d = daemon.clone();
+        clipboard.watch(move |text| {
+            let d = d.clone();
+            tokio::spawn(async move { d.broadcast(linet_core::Message::Clipboard { text }).await });
+        });
+    }
 
     let endpoint = transport::server_endpoint(daemon.identity(), daemon.policy(), args.port)
         .with_context(|| format!("не удалось занять UDP-порт {}", args.port))?;

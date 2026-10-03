@@ -18,6 +18,13 @@ class ShareActivity : Activity() {
                 IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
             else -> emptyList()
         }
+        // Поделились текстом, а не файлом — отправляем в буфер обмена ноутбука.
+        val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+        if (intent.action == Intent.ACTION_SEND && uris.isEmpty() && !text.isNullOrEmpty()) {
+            ClipboardSync.send(this, text)
+            finish()
+            return
+        }
         // Процесс мог только что запуститься: соединение ещё устанавливается, сервис его подождёт.
         val peer = Linet.client(this).paired()
         when {
