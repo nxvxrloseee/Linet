@@ -34,8 +34,12 @@
 cargo install --path crates/linetd
 cargo install --path crates/linetctl
 mkdir -p ~/.config/systemd/user && cp dist/linetd.service ~/.config/systemd/user/
-systemctl --user enable --now linetd
+systemctl --user daemon-reload
 ```
+
+Демону нужно окружение Wayland, поэтому его запускает Hyprland — в автозапуск
+(`hyprland.start` / `exec-once`) добавить `systemctl --user restart linetd`.
+Логи: `journalctl --user -u linetd -f`.
 
 Если включён файрвол, открой UDP-порт `47321` и mDNS (UDP `5353`) для локальной сети.
 
@@ -64,7 +68,7 @@ linetctl send файл1 файл2   # на подключённый телефо
 
 ```sh
 scripts/build-android-lib.sh                  # ядро на Rust → jniLibs + Kotlin-биндинги
-cd android && JAVA_HOME=/usr/lib/jvm/java-17-openjdk ./gradlew installDebug
+cd android && JAVA_HOME=/usr/lib/jvm/java-17-openjdk ./gradlew installRelease
 ```
 
 На Xiaomi после установки: в приложении нажать «Снять ограничение» (оптимизация

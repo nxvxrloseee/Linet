@@ -81,8 +81,10 @@ fn advertise(id: &str, name: &str, port: u16) -> Result<mdns_sd::ServiceDaemon> 
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Под systemd вывод идёт в журнал, цветовые коды там только мешают.
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
     let args = Args::parse();
 

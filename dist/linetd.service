@@ -1,12 +1,12 @@
 [Unit]
 Description=Linet — связь с Android-телефоном
-After=network-online.target graphical-session.target
-PartOf=graphical-session.target
+After=network-online.target
 
 [Service]
 ExecStart=%h/.cargo/bin/linetd
 Restart=on-failure
 RestartSec=3
 
-[Install]
-WantedBy=graphical-session.target
+# Автозапуска при входе нет намеренно: демону нужно окружение Wayland
+# (WAYLAND_DISPLAY и т. п.), которое Hyprland передаёт systemd уже после старта.
+# Поэтому запускает его сам Hyprland: systemctl --user restart linetd
