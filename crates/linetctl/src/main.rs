@@ -40,6 +40,8 @@ enum Cmd {
         #[arg(long, default_value = "")]
         to: String,
     },
+    /// Разблокировать экран телефоном (для горячей клавиши на экране блокировки)
+    Unlock,
     /// Отправить файлы на телефон
     Send {
         /// Устройство (по умолчанию — единственное подключённое)
@@ -80,6 +82,13 @@ async fn main() -> Result<()> {
             println!("Сопряжение удалено");
         }
         Cmd::Send { to, files } => send(&daemon, to, files).await?,
+        Cmd::Unlock => {
+            if daemon.request_unlock().await? {
+                println!("Разблокировано");
+            } else {
+                bail!("не разблокировано: экран не заблокирован или телефон отказал");
+            }
+        }
         Cmd::Open { url, title, to } => {
             daemon.send_url(&to, &url, &title).await?;
             println!("Открыто на телефоне");

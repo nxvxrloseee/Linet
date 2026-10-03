@@ -3,6 +3,7 @@ mod daemon;
 mod dbus;
 mod mirror;
 mod notify;
+mod unlock;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,6 +36,9 @@ struct Args {
     /// Не синхронизировать буфер обмена
     #[arg(long)]
     no_clipboard: bool,
+    /// Не разблокировать экран телефоном
+    #[arg(long)]
+    no_unlock: bool,
 }
 
 fn hostname() -> String {
@@ -93,7 +97,7 @@ async fn main() -> Result<()> {
         name: name.clone(),
         kind: DeviceKind::Laptop,
         proto: linet_core::PROTO_VERSION,
-        caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into(), "handoff".into()],
+        caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into(), "handoff".into(), "unlock".into()],
     };
     let id = identity.fingerprint().device_id();
     let (updates_tx, updates_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -113,7 +117,11 @@ async fn main() -> Result<()> {
         .with_context(|| format!("не удалось занять UDP-порт {}", args.port))?;
     tracing::info!(%id, %name, port = args.port, "linetd запущен");
 
-    let _dbus = dbus::serve(daemon.clone(), updates_rx).await.context("D-Bus: демон уже запущен?")?;
+    let unlocker = unlock::Unlocker::new(daemon.clone());
+    if !args.no_unlock {
+        unlocker.clone().watch();
+    }
+    let _dbus = dbus::serve(daemon.clone(), unlocker, updates_rx).await.context("D-Bus: демон уже запущен?")?;
     let _mdns = if args.no_mdns {
         None
     } else {

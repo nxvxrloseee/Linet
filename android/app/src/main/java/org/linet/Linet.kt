@@ -74,6 +74,10 @@ object Linet {
             Handoff.show(context, url, title)
         }
 
+        override fun onUnlockRequest(requestId: ULong, host: String) {
+            Unlock.onRequest(context, requestId, host)
+        }
+
         override fun onTransfer(transfer: TransferInfo) = Transfers.onUpdate(context, transfer)
     }
 }

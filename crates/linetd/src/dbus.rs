@@ -10,6 +10,7 @@ use zbus::object_server::{InterfaceRef, SignalEmitter};
 
 use crate::daemon::Daemon;
 use crate::mirror::Mirror;
+use crate::unlock::Unlocker;
 use crate::notify::{Notice, NoticeEvent, Notifier, xdg_open};
 
 pub const SERVICE: &str = "org.linet.Daemon";
@@ -17,6 +18,7 @@ pub const PATH: &str = "/org/linet/Daemon";
 
 pub struct Api {
     pub daemon: Arc<Daemon>,
+    pub unlocker: Arc<Unlocker>,
 }
 
 fn err(e: anyhow::Error) -> fdo::Error {
@@ -68,6 +70,11 @@ impl Api {
         self.daemon.send_url(id, url, title).await.map_err(err)
     }
 
+    /// Попросить телефон разблокировать экран. `true` — разблокировано.
+    async fn request_unlock(&self) -> fdo::Result<bool> {
+        self.unlocker.attempt("по запросу").await.map_err(err)
+    }
+
     #[zbus(signal)]
     pub async fn devices_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 
@@ -98,12 +105,13 @@ impl Api {
 
 pub async fn serve(
     daemon: Arc<Daemon>,
+    unlocker: Arc<Unlocker>,
     transfers: mpsc::UnboundedReceiver<TransferUpdate>,
 ) -> anyhow::Result<zbus::Connection> {
     let mut changes = daemon.subscribe();
     let conn = zbus::connection::Builder::session()?
         .name(SERVICE)?
-        .serve_at(PATH, Api { daemon: daemon.clone() })?
+        .serve_at(PATH, Api { daemon: daemon.clone(), unlocker })?
         .build()
         .await?;
     let iface = conn.object_server().interface::<_, Api>(PATH).await?;

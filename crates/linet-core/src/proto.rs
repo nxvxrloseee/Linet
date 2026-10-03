@@ -98,6 +98,9 @@ pub enum Message {
     Clipboard { text: String },
     /// «Продолжить на другом устройстве»: открыть страницу.
     Handoff { url: String, title: String },
+    /// Ноутбук → телефон: можно ли разблокировать экран? Ответ — `UnlockResponse`.
+    UnlockRequest { host: String },
+    UnlockResponse { approved: bool, reason: String },
     #[serde(other)]
     Unknown,
 }

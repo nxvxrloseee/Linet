@@ -162,6 +162,21 @@ impl Daemon {
         session.with_context(|| format!("{} не подключено", peer.name))
     }
 
+    /// Ждёт подключения единственного устройства (например, после выхода из сна).
+    pub async fn wait_session(&self, timeout: Duration) -> Result<Arc<Session>> {
+        let deadline = Instant::now() + timeout;
+        let mut changes = self.subscribe();
+        loop {
+            if let Ok(s) = self.session("") {
+                return Ok(s);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || tokio::time::timeout(left, changes.changed()).await.is_err() {
+                return self.session("");
+            }
+        }
+    }
+
     pub async fn send_url(&self, id: &str, url: &str, title: &str) -> Result<()> {
         if !(url.starts_with("https://") || url.starts_with("http://")) {
             bail!("нужна http(s)-ссылка");

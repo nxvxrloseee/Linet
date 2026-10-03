@@ -26,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
@@ -37,6 +38,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -92,6 +94,7 @@ private fun Screen() {
             is Status.Connected -> PeerCard(s.peer.name, connected = true, detail = null)
         }
         if (status !is Status.NotPaired) NotificationsCard()
+        if (status !is Status.NotPaired) UnlockCard()
         PowerCard()
     }
 }
@@ -203,6 +206,32 @@ private fun NotificationsCard() {
             Text("Уведомления на ноутбуке", style = MaterialTheme.typography.titleMedium)
             Text("Разреши Linet доступ к уведомлениям, чтобы видеть их на ноутбуке и отвечать оттуда.")
             Button(onClick = { NotifyListener.openSettings(context) }) { Text("Разрешить") }
+        }
+    }
+}
+
+@Composable
+private fun UnlockCard() {
+    val context = LocalContext.current
+    var auto by remember { mutableStateOf(Unlock.isAuto(context)) }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Разблокировка ноутбука", style = MaterialTheme.typography.titleMedium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Без подтверждения, если телефон разблокирован", Modifier.weight(1f))
+                Switch(checked = auto, onCheckedChange = {
+                    auto = it
+                    Unlock.setAuto(context, it)
+                })
+            }
+            Text(
+                if (auto) {
+                    "Открыл крышку с телефоном в руке — ноутбук разблокирован. Если телефон заблокирован, придёт запрос."
+                } else {
+                    "Каждый раз придёт запрос на телефон с подтверждением отпечатком или PIN."
+                },
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }

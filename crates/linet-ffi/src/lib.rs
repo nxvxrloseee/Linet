@@ -133,6 +133,8 @@ pub trait EventListener: Send + Sync {
     fn on_clipboard(&self, text: String);
     /// Ноутбук передал страницу («продолжить на телефоне»).
     fn on_handoff(&self, url: String, title: String);
+    /// Ноутбук просит разблокировать экран. Ответить — `answer_unlock(request_id, …)`.
+    fn on_unlock_request(&self, request_id: u64, host: String);
 }
 
 #[derive(uniffi::Object)]
@@ -190,7 +192,7 @@ impl LinetClient {
             name: device_name,
             kind: DeviceKind::Phone,
             proto: linet_core::PROTO_VERSION,
-            caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into(), "handoff".into()],
+            caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into(), "handoff".into(), "unlock".into()],
         };
         let progress = listener.clone();
         let transfers = Transfers::new(PathBuf::from(inbox_dir), Arc::new(move |u| progress.on_transfer(u.into())));
@@ -213,6 +215,7 @@ impl LinetClient {
                             Message::NotificationDismiss { key } => listener.on_notification_dismiss(key),
                             Message::Clipboard { text } => listener.on_clipboard(text),
                             Message::Handoff { url, title } => listener.on_handoff(url, title),
+                            Message::UnlockRequest { host } => listener.on_unlock_request(env.id, host),
                             other => tracing::debug!("сообщение: {other:?}"),
                         }
                         continue;
@@ -291,6 +294,16 @@ impl LinetClient {
         let connected = self.client.session().is_some();
         self.send_quietly(Message::Handoff { url, title });
         connected
+    }
+
+    pub fn answer_unlock(&self, request_id: u64, approved: bool, reason: String) {
+        let Some(session) = self.client.session() else { return };
+        self.rt.spawn(async move {
+            let reply = Message::UnlockResponse { approved, reason };
+            if let Err(e) = session.reply(request_id, reply).await {
+                tracing::debug!("ответ на разблокировку: {e:#}");
+            }
+        });
     }
 
     /// Время отклика ноутбука в миллисекундах.

@@ -100,6 +100,8 @@ impl Session {
                     tracing::debug!("ответ на ping: {e:#}");
                 }
             }
+            // Pong без ожидающего запроса — ответ на ping, отправленный через send().
+            Message::Pong => {}
             Message::Unknown => tracing::debug!(id = env.id, "неизвестное сообщение пропущено"),
             _ => {
                 // Если получатель не успевает, ждём — это естественный backpressure.
@@ -141,6 +143,16 @@ impl Session {
     }
 
     pub async fn request(&self, body: Message) -> Result<Message> {
+        self.request_with(body, REQUEST_TIMEOUT, true).await
+    }
+
+    /// Запрос, ответ на который ждёт решения человека: долгий таймаут,
+    /// и его истечение не означает, что соединение мертво.
+    pub async fn request_slow(&self, body: Message, timeout: Duration) -> Result<Message> {
+        self.request_with(body, timeout, false).await
+    }
+
+    async fn request_with(&self, body: Message, timeout: Duration, close_on_timeout: bool) -> Result<Message> {
         let id = self.alloc_id();
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
@@ -148,15 +160,17 @@ impl Session {
             self.pending.lock().unwrap().remove(&id);
             return Err(e);
         }
-        match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(msg)) => Ok(msg),
             Ok(Err(_)) => Err(anyhow!("сеанс закрыт")),
             Err(_) => {
                 self.pending.lock().unwrap().remove(&id);
-                // Пир не ответил даже из сна Wi-Fi — считаем соединение мёртвым
-                // (например, процесс приложения убит), чтобы клиент переподключился.
-                self.close("request timeout");
-                Err(anyhow!("нет ответа за {REQUEST_TIMEOUT:?}"))
+                if close_on_timeout {
+                    // Пир не ответил даже из сна Wi-Fi — считаем соединение мёртвым
+                    // (например, процесс приложения убит), чтобы клиент переподключился.
+                    self.close("request timeout");
+                }
+                Err(anyhow!("нет ответа за {timeout:?}"))
             }
         }
     }
