@@ -41,11 +41,32 @@ object ClipboardSync {
             return@post
         }
         val clip = ClipData.newPlainText("Linet", text)
-        // С ноутбука может прийти пароль: клавиатура не покажет превью и не сохранит его в истории.
-        clip.description.extras = PersistableBundle().apply { putBoolean(EXTRA_IS_SENSITIVE, true) }
+        // Похоже на пароль — клавиатура не покажет превью (будут точки) и не сохранит его в истории.
+        if (looksLikePassword(text)) {
+            clip.description.extras = PersistableBundle().apply { putBoolean(EXTRA_IS_SENSITIVE, true) }
+        }
         clipboard.setPrimaryClip(clip)
         lastSetAt = SystemClock.elapsedRealtime()
     }
+
+    /**
+     * Одно «слово» 8–64 символа, где есть хотя бы три вида символов из четырёх:
+     * строчные, заглавные, цифры, спецсимволы (кроме -_. — они обычны в именах файлов).
+     * Ссылки и адреса почты исключаем. Эвристика: иногда ошибётся в обе стороны.
+     */
+    fun looksLikePassword(text: String): Boolean {
+        if (text.length !in 8..64 || text.any { it.isWhitespace() }) return false
+        if ("://" in text || EMAIL.matches(text)) return false
+        val kinds = listOf(
+            text.any { it.isLowerCase() },
+            text.any { it.isUpperCase() },
+            text.any { it.isDigit() },
+            text.any { !it.isLetterOrDigit() && it !in "-_." },
+        ).count { it }
+        return kinds >= 3
+    }
+
+    private val EMAIL = Regex("[^@]+@[^@]+\\.[a-zA-Z]{2,}")
 
     /** Читать буфер можно только из окна в фокусе. */
     fun sendCurrent(activity: Activity) {

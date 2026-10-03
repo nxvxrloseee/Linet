@@ -11,6 +11,11 @@ use tokio::process::Command;
 /// Больше в буфер обычно кладут случайно (лог, дамп); такое не синхронизируем.
 pub const MAX_TEXT: usize = 256 * 1024;
 const RESTART_DELAY: Duration = Duration::from_secs(5);
+const CLEAR_POLL_EVERY: Duration = Duration::from_secs(5);
+/// 2 минуты — столько телефон готов очищать полученный текст.
+const CLEAR_POLLS: usize = 24;
+
+type OnChange = Arc<dyn Fn(String) + Send + Sync>;
 
 /// На каждое изменение wl-paste запускает эту команду с содержимым на stdin:
 /// `состояние\n` + текст + `\0`. NUL в text/plain не встречается.
@@ -46,6 +51,7 @@ impl Clipboard {
     /// Следит за буфером и вызывает `on_change` для нового текста, скопированного на ноутбуке.
     /// Пустая строка — буфер очищен.
     pub fn watch(self: Arc<Self>, on_change: impl Fn(String) + Send + Sync + 'static) {
+        let on_change: OnChange = Arc::new(on_change);
         tokio::spawn(async move {
             loop {
                 match self.run_watcher(&on_change).await {
@@ -61,7 +67,15 @@ impl Clipboard {
         });
     }
 
-    async fn run_watcher(&self, on_change: &(impl Fn(String) + Send + Sync)) -> std::io::Result<()> {
+    /// Буфер очищен — очищаем и копию на телефоне, если там лежит текст отсюда.
+    fn cleared(&self, on_change: &OnChange) {
+        if std::mem::take(&mut *self.last.lock().unwrap()) != 0 {
+            tracing::info!("буфер очищен, очищаю копию на телефоне");
+            on_change(String::new());
+        }
+    }
+
+    async fn run_watcher(self: &Arc<Self>, on_change: &OnChange) -> std::io::Result<()> {
         let mut child = Command::new("wl-paste")
             .args(["--type", "text", "--watch", "sh", "-c", WATCH_SCRIPT])
             .stdout(Stdio::piped())
@@ -87,27 +101,51 @@ impl Clipboard {
                 }
                 continue;
             }
-            match state.trim() {
-                "data" => {}
-                // Буфер очищен (так делают менеджеры паролей через N секунд) —
-                // очищаем и копию на телефоне, если она пришла отсюда.
-                "clear" | "nil" => {
-                    if std::mem::take(&mut *self.last.lock().unwrap()) != 0 {
-                        on_change(String::new());
-                    }
-                    continue;
-                }
-                // "sensitive" — пароль из менеджера паролей с пометкой: не пересылаем.
-                _ => continue,
+            // "sensitive" — пароль из менеджера паролей с пометкой: не пересылаем.
+            if state.trim() != "data" {
+                continue;
             }
             let Ok(text) = String::from_utf8(body) else { continue };
-            if text.trim().is_empty() || text.len() > MAX_TEXT || !self.remember(&text) {
+            // Многие менеджеры паролей «очищают» буфер, записывая пустую строку.
+            if text.trim().is_empty() {
+                self.cleared(on_change);
+                continue;
+            }
+            if text.len() > MAX_TEXT || !self.remember(&text) {
                 continue;
             }
             on_change(text);
+            self.clone().watch_for_clear(on_change.clone());
         }
         child.wait().await?;
         Ok(())
+    }
+
+    /// Настоящую очистку (`wl-copy --clear`) wl-paste --watch не сообщает, поэтому
+    /// после отправки текста какое-то время проверяем буфер сами. Дольше нет смысла:
+    /// телефон очищает свою копию только в течение того же окна.
+    fn watch_for_clear(self: Arc<Self>, on_change: OnChange) {
+        let sent = *self.last.lock().unwrap();
+        tokio::spawn(async move {
+            for _ in 0..CLEAR_POLLS {
+                tokio::time::sleep(CLEAR_POLL_EVERY).await;
+                // Скопировали что-то новое — за ним следит уже другая проверка.
+                if *self.last.lock().unwrap() != sent {
+                    return;
+                }
+                let empty = Command::new("wl-paste")
+                    .arg("--list-types")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await
+                    .is_ok_and(|s| !s.success());
+                if empty {
+                    self.cleared(&on_change);
+                    return;
+                }
+            }
+        });
     }
 
     /// Кладёт текст с телефона в буфер ноутбука.
