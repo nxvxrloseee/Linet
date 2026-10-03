@@ -101,6 +101,9 @@ object Transfers {
         }
     }
 
+    fun isForeignContent(context: Context, uri: Uri): Boolean =
+        uri.scheme == "content" && uri.authority?.startsWith(context.packageName) != true
+
     fun mimeOf(name: String): String =
         MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
             ?: "application/octet-stream"
@@ -144,6 +147,9 @@ object Transfers {
 
     /** Отправка одного URI. Блокирует до доставки — вызывать с фонового потока. */
     fun send(context: Context, uri: Uri) {
+        // «Поделиться» может вызвать любое приложение. file:// и наш собственный провайдер
+        // читались бы с правами Linet — так чужое приложение вытащило бы наши приватные файлы.
+        require(isForeignContent(context, uri)) { "отклонён URI $uri" }
         val resolver = context.contentResolver
         var name = uri.lastPathSegment ?: "file"
         var size = -1L

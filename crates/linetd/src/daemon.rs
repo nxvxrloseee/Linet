@@ -16,8 +16,10 @@ use tokio::sync::watch;
 
 use crate::clipboard::Clipboard;
 use crate::mirror::Mirror;
+use crate::notify::{Handler, Notice, NoticeEvent, Notifier};
 
 pub const PAIRING_WINDOW: Duration = Duration::from_secs(120);
+const PAIRING_CONFIRM: Duration = Duration::from_secs(60);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_BAD_HANDSHAKE: u32 = 2;
 
@@ -34,8 +36,9 @@ pub struct Daemon {
     pairing: Mutex<Option<PairingWindow>>,
     sessions: Mutex<HashMap<Fingerprint, Arc<Session>>>,
     transfers: Arc<Transfers>,
-    /// Появляется после подключения к D-Bus.
+    /// Появляются после подключения к D-Bus.
     mirror: OnceLock<Arc<Mirror>>,
+    notifier: OnceLock<Notifier>,
     clipboard: Option<Arc<Clipboard>>,
     /// Счётчик изменений списка устройств — для D-Bus-сигнала.
     changed: watch::Sender<u64>,
@@ -66,6 +69,7 @@ impl Daemon {
             sessions: Mutex::new(HashMap::new()),
             transfers,
             mirror: OnceLock::new(),
+            notifier: OnceLock::new(),
             clipboard,
             changed: watch::channel(0).0,
         })
@@ -79,7 +83,8 @@ impl Daemon {
         &self.hello
     }
 
-    pub fn set_mirror(&self, mirror: Arc<Mirror>) {
+    pub fn set_notifier(&self, notifier: Notifier, mirror: Arc<Mirror>) {
+        let _ = self.notifier.set(notifier);
         let _ = self.mirror.set(mirror);
     }
 
@@ -243,7 +248,7 @@ impl Daemon {
 
         match first.body {
             Message::PairRequest { hello, proof } => {
-                let reply = match self.try_pair(fp, &hello, &proof) {
+                let reply = match self.try_pair(fp, &hello, &proof).await {
                     Ok(()) => Message::PairAccept(self.hello.clone()),
                     Err(e) => {
                         tracing::warn!(name = %hello.name, "сопряжение отклонено: {e:#}");
@@ -266,15 +271,19 @@ impl Daemon {
         }
     }
 
-    fn try_pair(&self, fp: Fingerprint, hello: &Hello, proof: &[u8]) -> Result<()> {
-        let mut window = self.pairing.lock().unwrap();
-        let w = window.as_ref().filter(|w| w.expires > Instant::now()).context("окно сопряжения закрыто")?;
-        if !pairing::verify(&w.invite.secret, &self.identity.fingerprint(), &fp, proof) {
-            bail!("неверный код сопряжения");
+    async fn try_pair(&self, fp: Fingerprint, hello: &Hello, proof: &[u8]) -> Result<()> {
+        {
+            let mut window = self.pairing.lock().unwrap();
+            let w = window.as_ref().filter(|w| w.expires > Instant::now()).context("окно сопряжения закрыто")?;
+            if !pairing::verify(&w.invite.secret, &self.identity.fingerprint(), &fp, proof) {
+                bail!("неверный код сопряжения");
+            }
+            // Приглашение одноразовое.
+            window.take();
         }
-        // Приглашение одноразовое.
-        window.take();
-        drop(window);
+        // Открыть окно сопряжения может любой процесс пользователя через D-Bus,
+        // поэтому новое устройство подтверждает человек — кнопкой в уведомлении.
+        self.confirm_pairing(fp, hello).await?;
         self.store.lock().unwrap().upsert(PeerRecord {
             fingerprint: fp,
             name: hello.name.clone(),
@@ -284,6 +293,38 @@ impl Daemon {
         })?;
         tracing::info!(name = %hello.name, id = %fp.device_id(), "новое устройство сопряжено");
         self.notify_changed();
+        Ok(())
+    }
+
+    async fn confirm_pairing(&self, fp: Fingerprint, hello: &Hello) -> Result<()> {
+        let notifier = self.notifier.get().context("нет сервера уведомлений для подтверждения")?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = Mutex::new(Some(tx));
+        let summary = format!("Сопрячь «{}»?", hello.name);
+        let body = format!("Новое устройство, id {}. Оно получит уведомления, буфер обмена и файлы.", fp.device_id());
+        let notice = Notice {
+            app: "Linet",
+            summary: &summary,
+            body: &body,
+            icon: "dialog-password",
+            actions: &[("accept", "Сопрячь"), ("reject", "Отклонить")],
+            replaces: 0,
+        };
+        let handler: Handler = Box::new(move |event| {
+            let decision = match event {
+                NoticeEvent::Action("accept") => true,
+                NoticeEvent::Action(_) | NoticeEvent::Closed(_) => false,
+            };
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let _ = tx.send(decision);
+            }
+        });
+        let id = notifier.show(notice, Some(handler)).await?;
+        let decision = tokio::time::timeout(PAIRING_CONFIRM, rx).await;
+        if !matches!(decision, Ok(Ok(true))) {
+            notifier.close(id).await;
+            bail!("сопряжение не подтверждено на ноутбуке");
+        }
         Ok(())
     }
 

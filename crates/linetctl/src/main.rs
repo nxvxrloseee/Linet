@@ -121,9 +121,11 @@ async fn pair(daemon: &DaemonProxy<'_>, uri_only: bool, light: bool) -> Result<(
         let image = code.render::<Dense1x2>().dark_color(dark).light_color(bright).quiet_zone(true).build();
         println!("{image}");
         println!("Отсканируй код в приложении Linet на телефоне. Код действует 2 минуты.");
+        println!("Затем подтверди новое устройство в уведомлении на ноутбуке.");
     }
 
-    let deadline = Instant::now() + Duration::from_secs(120);
+    // 2 минуты на сканирование и ещё минута на подтверждение в уведомлении.
+    let deadline = Instant::now() + Duration::from_secs(180);
     while Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let devices = daemon.devices().await?;

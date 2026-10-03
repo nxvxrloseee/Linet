@@ -23,6 +23,9 @@ const CHUNK: usize = 64 * 1024;
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 /// Сколько ждать поток после принятого предложения.
 const OFFER_TTL: Duration = Duration::from_secs(60);
+const MAX_PENDING: usize = 64;
+/// Лимит размера по умолчанию.
+pub const DEFAULT_MAX_SIZE: u64 = 8 << 30;
 
 #[derive(Debug, Clone)]
 pub enum TransferState {
@@ -53,15 +56,23 @@ struct Offer {
 
 pub struct Transfers {
     inbox: PathBuf,
+    max_size: u64,
     pending: Mutex<HashMap<u64, Offer>>,
     next_id: AtomicU64,
     progress: ProgressFn,
 }
 
 impl Transfers {
-    pub fn new(inbox: PathBuf, progress: ProgressFn) -> Arc<Self> {
+    /// `max_size` — самый большой принимаемый файл: защита от заполнения диска.
+    pub fn new(inbox: PathBuf, max_size: u64, progress: ProgressFn) -> Arc<Self> {
         let seed = crate::store::now_unix() << 20 | u64::from(std::process::id() & 0xfffff);
-        Arc::new(Self { inbox, pending: Mutex::new(HashMap::new()), next_id: AtomicU64::new(seed), progress })
+        Arc::new(Self {
+            inbox,
+            max_size,
+            pending: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(seed),
+            progress,
+        })
     }
 
     pub fn inbox(&self) -> &Path {
@@ -97,7 +108,14 @@ impl Transfers {
     }
 
     fn accept_offer(&self, id: u64, name: String, size: u64, peer: &str) -> Message {
+        if size > self.max_size {
+            tracing::warn!(%peer, %name, size, "файл больше лимита");
+            return Message::FileReject { id, reason: format!("файл больше {} МБ", self.max_size >> 20) };
+        }
         let mut pending = self.pending.lock().unwrap();
+        if pending.len() >= MAX_PENDING {
+            return Message::FileReject { id, reason: "слишком много передач сразу".into() };
+        }
         pending.retain(|_, o| o.accepted.elapsed() < OFFER_TTL);
         let name = sanitize(&name);
         tracing::info!(%peer, %name, size, "входящий файл");
@@ -126,11 +144,8 @@ impl Transfers {
         let part = self.inbox.join(format!(".linet-{id}.part"));
         let result = self.receive_into(&mut stream, &part, &mut update).await;
         update.state = match result {
-            Ok(()) => match unique_path(&self.inbox, &offer.name) {
-                Ok(path) => match tokio::fs::rename(&part, &path).await {
-                    Ok(()) => TransferState::Done { path: Some(path) },
-                    Err(e) => TransferState::Failed(e.to_string()),
-                },
+            Ok(()) => match persist(&part, &self.inbox, &offer.name) {
+                Ok(path) => TransferState::Done { path: Some(path) },
                 Err(e) => TransferState::Failed(format!("{e:#}")),
             },
             Err(e) => {
@@ -248,20 +263,28 @@ pub fn sanitize(name: &str) -> String {
     out
 }
 
-/// `name`, а если занято — `name (1)`, `name (2)`, …
-fn unique_path(dir: &Path, name: &str) -> Result<PathBuf> {
-    let candidate = dir.join(name);
-    if !candidate.exists() {
-        return Ok(candidate);
-    }
+/// Переносит `.part` в `dir` под именем `name`, а если оно занято — `name (1)`, `name (2)`, …
+/// Жёсткая ссылка создаётся атомарно и не перезаписывает существующий файл,
+/// так что два одновременных приёма с одним именем не затрут друг друга.
+fn persist(part: &Path, dir: &Path, name: &str) -> Result<PathBuf> {
     let (stem, ext) = match name.rsplit_once('.') {
         Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
         _ => (name, String::new()),
     };
-    for i in 1..10_000 {
-        let p = dir.join(format!("{stem} ({i}){ext}"));
-        if !p.exists() {
-            return Ok(p);
+    for i in 0..10_000 {
+        let candidate = if i == 0 { dir.join(name) } else { dir.join(format!("{stem} ({i}){ext}")) };
+        match std::fs::hard_link(part, &candidate) {
+            Ok(()) => {
+                std::fs::remove_file(part)?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            // Файловая система без жёстких ссылок: проверка и rename (маленькое окно гонки).
+            Err(_) if !candidate.exists() => {
+                std::fs::rename(part, &candidate)?;
+                return Ok(candidate);
+            }
+            Err(e) => return Err(e).with_context(|| format!("{candidate:?}")),
         }
     }
     bail!("не удалось подобрать имя для {name}")
@@ -282,13 +305,18 @@ mod tests {
     }
 
     #[test]
-    fn unique_names() {
+    fn persist_never_overwrites() {
         let dir = std::env::temp_dir().join(format!("linet-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("a.txt"), b"").unwrap();
-        std::fs::write(dir.join("a (1).txt"), b"").unwrap();
-        assert_eq!(unique_path(&dir, "a.txt").unwrap(), dir.join("a (2).txt"));
-        assert_eq!(unique_path(&dir, "b").unwrap(), dir.join("b"));
+        std::fs::write(dir.join("a.txt"), b"old").unwrap();
+        std::fs::write(dir.join("a (1).txt"), b"old").unwrap();
+        let part = dir.join(".x.part");
+        std::fs::write(&part, b"new").unwrap();
+        assert_eq!(persist(&part, &dir, "a.txt").unwrap(), dir.join("a (2).txt"));
+        assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"old");
+        assert!(!part.exists());
+        std::fs::write(&part, b"new").unwrap();
+        assert_eq!(persist(&part, &dir, "b").unwrap(), dir.join("b"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

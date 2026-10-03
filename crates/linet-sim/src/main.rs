@@ -51,6 +51,7 @@ async fn main() -> Result<()> {
     };
     let transfers = Transfers::new(
         args.dir.join("inbox"),
+        linet_core::files::DEFAULT_MAX_SIZE,
         Arc::new(|u| match u.state {
             TransferState::Progress => {}
             state => println!("передача {} ({}): {state:?}", u.name, if u.incoming { "приём" } else { "отправка" }),

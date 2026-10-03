@@ -1,6 +1,15 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// Ключ подписи лежит вне репозитория: ~/.config/linet/signing.properties (+ .jks рядом).
+// Без него release подписывается debug-ключом, и обновить установленное приложение не выйдет.
+val signingProps = Properties().apply {
+    val file = File(System.getProperty("user.home"), ".config/linet/signing.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
 }
 
 android {
@@ -16,13 +25,26 @@ android {
         ndk { abiFilters += listOf("arm64-v8a") }
     }
 
+    signingConfigs {
+        if (signingProps.isNotEmpty()) {
+            create("linet") {
+                storeFile = File(signingProps.getProperty("storeFile"))
+                storePassword = signingProps.getProperty("storePassword")
+                keyAlias = signingProps.getProperty("keyAlias")
+                keyPassword = signingProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfigs.findByName("linet")?.let { signingConfig = it }
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Для личного использования подписываем debug-ключом.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("linet") ?: signingConfigs.getByName("debug")
         }
     }
 

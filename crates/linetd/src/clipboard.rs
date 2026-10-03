@@ -44,6 +44,7 @@ impl Clipboard {
     }
 
     /// Следит за буфером и вызывает `on_change` для нового текста, скопированного на ноутбуке.
+    /// Пустая строка — буфер очищен.
     pub fn watch(self: Arc<Self>, on_change: impl Fn(String) + Send + Sync + 'static) {
         tokio::spawn(async move {
             loop {
@@ -86,9 +87,18 @@ impl Clipboard {
                 }
                 continue;
             }
-            if state.trim() != "data" {
-                // "sensitive" — пароль из менеджера паролей, "nil"/"clear" — пусто.
-                continue;
+            match state.trim() {
+                "data" => {}
+                // Буфер очищен (так делают менеджеры паролей через N секунд) —
+                // очищаем и копию на телефоне, если она пришла отсюда.
+                "clear" | "nil" => {
+                    if std::mem::take(&mut *self.last.lock().unwrap()) != 0 {
+                        on_change(String::new());
+                    }
+                    continue;
+                }
+                // "sensitive" — пароль из менеджера паролей с пометкой: не пересылаем.
+                _ => continue,
             }
             let Ok(text) = String::from_utf8(body) else { continue };
             if text.trim().is_empty() || text.len() > MAX_TEXT || !self.remember(&text) {
@@ -102,7 +112,7 @@ impl Clipboard {
 
     /// Кладёт текст с телефона в буфер ноутбука.
     pub async fn set(&self, text: String) {
-        if text.len() > MAX_TEXT || !self.remember(&text) {
+        if text.is_empty() || text.len() > MAX_TEXT || !self.remember(&text) {
             return;
         }
         let child = Command::new("wl-copy").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();

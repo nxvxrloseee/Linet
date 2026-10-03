@@ -17,7 +17,7 @@ class ShareActivity : Activity() {
             Intent.ACTION_SEND_MULTIPLE ->
                 IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
             else -> emptyList()
-        }
+        }.filter { Transfers.isForeignContent(this, it) }
         // Поделились текстом, а не файлом: ссылку открываем на ноутбуке, остальное — в его буфер.
         val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
         if (intent.action == Intent.ACTION_SEND && uris.isEmpty() && !text.isNullOrEmpty()) {

@@ -127,7 +127,7 @@ pub async fn serve(
 
     let notifier = Notifier::new(&conn).await.map_err(|e| tracing::warn!("уведомления недоступны: {e}")).ok();
     if let Some(n) = &notifier {
-        daemon.set_mirror(Mirror::new(n.clone(), cache_dir()));
+        daemon.set_notifier(n.clone(), Mirror::new(n.clone(), cache_dir()));
     }
     tokio::spawn(forward_transfers(iface, notifier, transfers));
     Ok(conn)

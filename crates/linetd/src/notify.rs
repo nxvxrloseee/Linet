@@ -27,6 +27,8 @@ trait Notifications {
 
     fn close_notification(&self, id: u32) -> zbus::Result<()>;
 
+    fn get_capabilities(&self) -> zbus::Result<Vec<String>>;
+
     #[zbus(signal)]
     fn action_invoked(&self, id: u32, action_key: String) -> zbus::Result<()>;
 
@@ -59,6 +61,33 @@ pub struct Notice<'a> {
 pub struct Notifier {
     proxy: NotificationsProxy<'static>,
     handlers: Arc<Mutex<HashMap<u32, Handler>>>,
+    /// Сервер разбирает разметку в теле — тогда текст нужно экранировать.
+    body_markup: bool,
+}
+
+/// Текст уведомлений приходит от чужих людей (имя и сообщение в мессенджере),
+/// поэтому разметку в нём нужно обезвредить.
+///
+/// Тело: числовые HTML-сущности для всех символов разметки HTML и Markdown.
+/// Их декодируют и HTML, и Markdown (Caelestia), но как разметку не исполняют.
+pub fn escape_body(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' | '<' | '>' | '"' | '\'' | '[' | ']' | '(' | ')' | '*' | '_' | '`' | '#' | '!' | '\\' | '~' | '|' => {
+                out.push_str(&format!("&#{};", c as u32))
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Заголовок по спецификации — простой текст, но некоторые серверы (Qt AutoText)
+/// распознают в нём HTML по «<». Сущности там не декодируются, поэтому заменяем
+/// угловые скобки похожими символами.
+pub fn neutralize_plain(text: &str) -> String {
+    text.replace('<', "‹").replace('>', "›")
 }
 
 impl Notifier {
@@ -87,7 +116,8 @@ impl Notifier {
                 }
             }
         });
-        Ok(Self { proxy, handlers })
+        let body_markup = proxy.get_capabilities().await.is_ok_and(|caps| caps.iter().any(|c| c == "body-markup"));
+        Ok(Self { proxy, handlers, body_markup })
     }
 
     pub async fn show(&self, notice: Notice<'_>, handler: Option<Handler>) -> zbus::Result<u32> {
@@ -96,10 +126,9 @@ impl Notifier {
         if notice.app == "Linet" {
             hints.insert("desktop-entry", Value::from("linet"));
         }
-        let id = self
-            .proxy
-            .notify(notice.app, notice.replaces, notice.icon, notice.summary, notice.body, &actions, hints, -1)
-            .await?;
+        let body = if self.body_markup { escape_body(notice.body) } else { notice.body.to_string() };
+        let (app, summary) = (neutralize_plain(notice.app), neutralize_plain(notice.summary));
+        let id = self.proxy.notify(&app, notice.replaces, notice.icon, &summary, &body, &actions, hints, -1).await?;
         let mut handlers = self.handlers.lock().unwrap();
         match handler {
             Some(handler) => drop(handlers.insert(id, handler)),
@@ -153,5 +182,25 @@ pub fn xdg_open(path: &std::path::Path) {
         // Дождаться в отдельном потоке, чтобы не оставлять зомби.
         Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
         Err(e) => tracing::warn!("xdg-open {path:?}: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_markup_is_inert() {
+        let evil = "[тык](https://evil) ![x](https://evil/p.png) <img src=x> **b** `c`";
+        let escaped = escape_body(evil);
+        for c in ['[', ']', '(', ')', '<', '>', '*', '`', '!'] {
+            assert!(!escaped.contains(c), "остался {c}: {escaped}");
+        }
+        assert_eq!(escape_body("Привет, как дела?"), "Привет, как дела?");
+    }
+
+    #[test]
+    fn plain_has_no_tags() {
+        assert_eq!(neutralize_plain("<b>Вася</b>"), "‹b›Вася‹/b›");
     }
 }

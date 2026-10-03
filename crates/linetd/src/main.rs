@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
     let id = identity.fingerprint().device_id();
     let (updates_tx, updates_rx) = tokio::sync::mpsc::unbounded_channel();
     let inbox = downloads_dir()?.join("Linet");
-    let transfers = Transfers::new(inbox, Arc::new(move |u| drop(updates_tx.send(u))));
+    let transfers = Transfers::new(inbox, linet_core::files::DEFAULT_MAX_SIZE, Arc::new(move |u| drop(updates_tx.send(u))));
     let clipboard = (!args.no_clipboard).then(clipboard::Clipboard::new);
     let daemon = Daemon::new(identity, store, hello, args.port, transfers, clipboard.clone());
     if let Some(clipboard) = clipboard {

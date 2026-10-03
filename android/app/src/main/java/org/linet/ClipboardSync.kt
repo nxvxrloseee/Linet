@@ -10,6 +10,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PersistableBundle
+import android.os.SystemClock
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.widget.Toast
@@ -23,9 +25,26 @@ import android.widget.Toast
 object ClipboardSync {
     private val main = Handler(Looper.getMainLooper())
 
-    /** Вызывается из потока Rust. */
+    /** Сколько после записи очистка с ноутбука ещё касается нашего текста. */
+    private const val CLEAR_WINDOW_MS = 2 * 60 * 1000L
+    private var lastSetAt = 0L
+    /** ClipDescription.EXTRA_IS_SENSITIVE (API 33); на старых версиях ключ просто игнорируется. */
+    private const val EXTRA_IS_SENSITIVE = "android.content.extra.IS_SENSITIVE"
+
+    /** Вызывается из потока Rust. Пустой текст — на ноутбуке буфер очистили. */
     fun apply(context: Context, text: String) = main.post {
-        context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Linet", text))
+        val clipboard = context.getSystemService(ClipboardManager::class.java)
+        if (text.isEmpty()) {
+            // Очищаем, только если в буфере, скорее всего, ещё наш текст: читать буфер
+            // в фоне нельзя, поэтому ориентируемся на время.
+            if (SystemClock.elapsedRealtime() - lastSetAt < CLEAR_WINDOW_MS) clipboard.clearPrimaryClip()
+            return@post
+        }
+        val clip = ClipData.newPlainText("Linet", text)
+        // С ноутбука может прийти пароль: клавиатура не покажет превью и не сохранит его в истории.
+        clip.description.extras = PersistableBundle().apply { putBoolean(EXTRA_IS_SENSITIVE, true) }
+        clipboard.setPrimaryClip(clip)
+        lastSetAt = SystemClock.elapsedRealtime()
     }
 
     /** Читать буфер можно только из окна в фокусе. */
