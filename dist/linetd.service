@@ -1,0 +1,12 @@
+[Unit]
+Description=Linet — связь с Android-телефоном
+After=network-online.target graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.cargo/bin/linetd
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

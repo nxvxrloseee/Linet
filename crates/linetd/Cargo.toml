@@ -1,0 +1,20 @@
+[package]
+name = "linetd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+linet-core.workspace = true
+anyhow.workspace = true
+tokio = { workspace = true, features = ["process"] }
+quinn.workspace = true
+serde_bytes.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+zbus.workspace = true
+mdns-sd = "0.21"
+if-addrs = "0.15"
+mime_guess = "2"
+futures-util = { version = "0.3", default-features = false }
