@@ -93,7 +93,7 @@ async fn main() -> Result<()> {
         name: name.clone(),
         kind: DeviceKind::Laptop,
         proto: linet_core::PROTO_VERSION,
-        caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into()],
+        caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into(), "handoff".into()],
     };
     let id = identity.fingerprint().device_id();
     let (updates_tx, updates_rx) = tokio::sync::mpsc::unbounded_channel();

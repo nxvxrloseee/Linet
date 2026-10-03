@@ -96,6 +96,8 @@ pub enum Message {
     NotificationDismiss { key: String },
     /// Новое содержимое буфера обмена (только текст).
     Clipboard { text: String },
+    /// «Продолжить на другом устройстве»: открыть страницу.
+    Handoff { url: String, title: String },
     #[serde(other)]
     Unknown,
 }

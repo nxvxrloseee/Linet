@@ -6,3 +6,4 @@
 /android/app/src/main/jniLibs
 /android/app/src/main/java/uniffi
 /.sim
+/dist/firefox

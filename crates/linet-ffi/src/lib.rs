@@ -131,6 +131,8 @@ pub trait EventListener: Send + Sync {
     fn on_notification_dismiss(&self, key: String);
     /// На ноутбуке скопировали текст.
     fn on_clipboard(&self, text: String);
+    /// Ноутбук передал страницу («продолжить на телефоне»).
+    fn on_handoff(&self, url: String, title: String);
 }
 
 #[derive(uniffi::Object)]
@@ -188,7 +190,7 @@ impl LinetClient {
             name: device_name,
             kind: DeviceKind::Phone,
             proto: linet_core::PROTO_VERSION,
-            caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into()],
+            caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into(), "handoff".into()],
         };
         let progress = listener.clone();
         let transfers = Transfers::new(PathBuf::from(inbox_dir), Arc::new(move |u| progress.on_transfer(u.into())));
@@ -210,6 +212,7 @@ impl LinetClient {
                             }
                             Message::NotificationDismiss { key } => listener.on_notification_dismiss(key),
                             Message::Clipboard { text } => listener.on_clipboard(text),
+                            Message::Handoff { url, title } => listener.on_handoff(url, title),
                             other => tracing::debug!("сообщение: {other:?}"),
                         }
                         continue;
@@ -280,6 +283,13 @@ impl LinetClient {
     pub fn send_clipboard(&self, text: String) -> bool {
         let connected = self.client.session().is_some();
         self.send_quietly(Message::Clipboard { text });
+        connected
+    }
+
+    /// Открыть ссылку на ноутбуке. `false` — нет соединения.
+    pub fn send_handoff(&self, url: String, title: String) -> bool {
+        let connected = self.client.session().is_some();
+        self.send_quietly(Message::Handoff { url, title });
         connected
     }
 

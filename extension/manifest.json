@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Linet",
+  "version": "0.1.1",
+  "description": "Открыть текущую страницу или ссылку на телефоне (Linet Handoff).",
+  "permissions": [
+    "activeTab",
+    "contextMenus",
+    "nativeMessaging"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ],
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Открыть на телефоне"
+  },
+  "commands": {
+    "send-tab": {
+      "suggested_key": {
+        "default": "Ctrl+Alt+P"
+      },
+      "description": "Открыть текущую вкладку на телефоне"
+    }
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "linet@linet.local",
+      "strict_min_version": "142.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmez5ZxMpL/CAWHOTxlcSGlM4OyifRFwDp9wkUUg9td5AT4nA2nmOZYZ8mMZtdq6GPSh3ORRIP9FX4eqhI+aCCjbGPQxXi+ipQgzS8Dmsa+LzRSWowPTg0ZSJz++jj1MWmGAVO5Pd7wdTU+uMx5LZtk9//pXW1DK8Ix0BzibL6dA4kyLocoJjp13Ot2K6Tn/4QT7vHv8HS7owJDJDNxrE+PNUzcIn/slLUCNXke/IMMYo0z/1n2EA51GfgnHoEmdkx5U8YjPurVWQTrCV7WqZ//WiOp8KkCetO1gKI0jOHtdTaOiiZfJByaepL8GLTcRDiN5BXjmYCcvl1GTDbdq1CQIDAQAB"
+}

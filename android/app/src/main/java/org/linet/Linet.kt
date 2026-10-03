@@ -70,6 +70,10 @@ object Linet {
             ClipboardSync.apply(context, text)
         }
 
+        override fun onHandoff(url: String, title: String) {
+            Handoff.show(context, url, title)
+        }
+
         override fun onTransfer(transfer: TransferInfo) = Transfers.onUpdate(context, transfer)
     }
 }

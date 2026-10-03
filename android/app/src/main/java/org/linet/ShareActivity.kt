@@ -18,10 +18,17 @@ class ShareActivity : Activity() {
                 IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
             else -> emptyList()
         }
-        // Поделились текстом, а не файлом — отправляем в буфер обмена ноутбука.
+        // Поделились текстом, а не файлом: ссылку открываем на ноутбуке, остальное — в его буфер.
         val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
         if (intent.action == Intent.ACTION_SEND && uris.isEmpty() && !text.isNullOrEmpty()) {
-            ClipboardSync.send(this, text)
+            val url = Handoff.extractUrl(text)
+            if (url != null) {
+                val subject = intent.getStringExtra(Intent.EXTRA_SUBJECT)
+                    ?: text.trim().lines().takeIf { it.size == 2 }?.first().orEmpty()
+                Handoff.send(this, url, subject)
+            } else {
+                ClipboardSync.send(this, text)
+            }
             finish()
             return
         }

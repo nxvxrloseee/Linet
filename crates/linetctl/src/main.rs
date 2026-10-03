@@ -5,28 +5,7 @@ use clap::{Parser, Subcommand};
 use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
 
-#[zbus::proxy(
-    interface = "org.linet.Daemon1",
-    default_service = "org.linet.Daemon",
-    default_path = "/org/linet/Daemon"
-)]
-trait Daemon {
-    fn devices(&self) -> zbus::Result<Vec<(String, String, String, bool)>>;
-    fn info(&self) -> zbus::Result<(String, String)>;
-    fn start_pairing(&self) -> zbus::Result<String>;
-    fn cancel_pairing(&self) -> zbus::Result<()>;
-    fn ping(&self, id: &str) -> zbus::Result<f64>;
-    fn unpair(&self, id: &str) -> zbus::Result<()>;
-    fn send_file(&self, id: &str, path: &str) -> zbus::Result<u64>;
-
-    #[zbus(signal)]
-    fn transfer_progress(&self, id: u64, peer: String, name: String, incoming: bool, done: u64, total: u64)
-    -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    fn transfer_finished(&self, id: u64, peer: String, name: String, incoming: bool, ok: bool, detail: String)
-    -> zbus::Result<()>;
-}
+use linetctl::DaemonProxy;
 
 #[derive(Parser)]
 #[command(version, about = "Управление Linet")]
@@ -52,6 +31,15 @@ enum Cmd {
     Ping { id: String },
     /// Удалить сопряжение
     Unpair { id: String },
+    /// Открыть ссылку на телефоне (Handoff)
+    Open {
+        url: String,
+        #[arg(long, default_value = "")]
+        title: String,
+        /// Устройство (по умолчанию — единственное подключённое)
+        #[arg(long, default_value = "")]
+        to: String,
+    },
     /// Отправить файлы на телефон
     Send {
         /// Устройство (по умолчанию — единственное подключённое)
@@ -92,6 +80,10 @@ async fn main() -> Result<()> {
             println!("Сопряжение удалено");
         }
         Cmd::Send { to, files } => send(&daemon, to, files).await?,
+        Cmd::Open { url, title, to } => {
+            daemon.send_url(&to, &url, &title).await?;
+            println!("Открыто на телефоне");
+        }
         Cmd::Status => {
             let devices = daemon.devices().await?;
             let online: Vec<&str> =

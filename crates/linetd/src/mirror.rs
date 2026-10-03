@@ -25,6 +25,7 @@ impl Mirror {
     pub async fn handle(&self, session: &Arc<Session>, msg: Message) -> Option<Message> {
         match msg {
             Message::Notification(n) => self.show(session, n).await,
+            Message::Handoff { url, title } => self.handoff(&session.hello().name, url, title).await,
             Message::NotificationRemoved { key } => {
                 let id = self.shown.lock().unwrap().remove(&key);
                 if let Some(id) = id {
@@ -34,6 +35,32 @@ impl Mirror {
             other => return Some(other),
         }
         None
+    }
+
+    /// Ссылка с телефона: уведомление, по клику открывается в браузере.
+    pub async fn handoff(&self, peer: &str, url: String, title: String) {
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            tracing::warn!(%url, "Handoff: принимаются только http(s)-ссылки");
+            return;
+        }
+        let summary = if title.is_empty() { format!("Ссылка с {peer}") } else { title };
+        let notice = Notice {
+            app: "Linet",
+            summary: &summary,
+            body: &url,
+            icon: "web-browser",
+            actions: &[("default", "Открыть")],
+            replaces: 0,
+        };
+        let open_url = url.clone();
+        let handler: Handler = Box::new(move |event| {
+            if let NoticeEvent::Action(_) = event {
+                crate::notify::xdg_open(std::path::Path::new(&open_url));
+            }
+        });
+        if let Err(e) = self.notifier.show(notice, Some(handler)).await {
+            tracing::warn!("уведомление Handoff: {e}");
+        }
     }
 
     fn icon_path(&self, package: &str, png: Option<&[u8]>) -> String {

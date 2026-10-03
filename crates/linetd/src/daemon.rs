@@ -146,10 +146,29 @@ impl Daemon {
         self.store.lock().unwrap().find(id).cloned().with_context(|| format!("устройство {id} не найдено"))
     }
 
+    /// Сеанс по id; пустой id — единственное подключённое устройство.
     fn session(&self, id: &str) -> Result<Arc<Session>> {
+        if id.is_empty() {
+            let sessions = self.sessions.lock().unwrap();
+            let mut it = sessions.values();
+            return match (it.next(), it.next()) {
+                (Some(s), None) => Ok(s.clone()),
+                (None, _) => bail!("нет подключённых устройств"),
+                _ => bail!("подключено несколько устройств, укажи какое"),
+            };
+        }
         let peer = self.find(id)?;
         let session = self.sessions.lock().unwrap().get(&peer.fingerprint).cloned();
         session.with_context(|| format!("{} не подключено", peer.name))
+    }
+
+    pub async fn send_url(&self, id: &str, url: &str, title: &str) -> Result<()> {
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            bail!("нужна http(s)-ссылка");
+        }
+        let session = self.session(id)?;
+        session.send(Message::Handoff { url: url.into(), title: title.into() }).await?;
+        Ok(())
     }
 
     pub async fn ping(&self, id: &str) -> Result<Duration> {

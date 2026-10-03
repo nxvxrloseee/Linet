@@ -63,6 +63,11 @@ impl Api {
         self.daemon.send_file(id, path).await.map_err(err)
     }
 
+    /// Открыть ссылку на устройстве. Пустой `id` — единственное подключённое.
+    async fn send_url(&self, id: &str, url: &str, title: &str) -> fdo::Result<()> {
+        self.daemon.send_url(id, url, title).await.map_err(err)
+    }
+
     #[zbus(signal)]
     pub async fn devices_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 
