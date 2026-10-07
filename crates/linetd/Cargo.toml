@@ -19,3 +19,5 @@ mdns-sd = "0.21"
 if-addrs = "0.15"
 mime_guess = "2"
 futures-util = { version = "0.3", default-features = false }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }

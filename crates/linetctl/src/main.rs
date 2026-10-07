@@ -47,8 +47,19 @@ enum Cmd {
         /// Устройство (по умолчанию — единственное подключённое)
         #[arg(long)]
         to: Option<String>,
-        #[arg(required = true)]
+        /// Выбрать файлы в окне и сообщить результат уведомлением (для трея и меню)
+        #[arg(long)]
+        pick: bool,
+        /// Сообщить результат уведомлением, а не в терминал («Открыть с помощью» в файловом менеджере)
+        #[arg(long)]
+        notify: bool,
         files: Vec<std::path::PathBuf>,
+    },
+    /// Обновить приложение на телефоне (по умолчанию — свежий release-APK из android/)
+    UpdatePhone {
+        apk: Option<std::path::PathBuf>,
+        #[arg(long)]
+        to: Option<String>,
     },
     /// Состояние одной строкой JSON (для waybar)
     Status,
@@ -69,7 +80,13 @@ async fn main() -> Result<()> {
             }
             for (id, name, kind, connected) in devices {
                 let state = if connected { "● подключено" } else { "○ не в сети" };
-                println!("{id}  {name:<20} {kind:<8} {state}");
+                let battery = match daemon.battery(&id).await {
+                    Ok((level, charging)) if level >= 0 => {
+                        format!("  🔋{level}%{}", if charging { " ⚡" } else { "" })
+                    }
+                    _ => String::new(),
+                };
+                println!("{id}  {name:<20} {kind:<8} {state}{battery}");
             }
         }
         Cmd::Pair { uri, light } => pair(&daemon, uri, light).await?,
@@ -81,7 +98,31 @@ async fn main() -> Result<()> {
             daemon.unpair(&id).await?;
             println!("Сопряжение удалено");
         }
-        Cmd::Send { to, files } => send(&daemon, to, files).await?,
+        Cmd::Send { to, pick, notify, mut files } => {
+            let gui = pick || notify;
+            if pick || files.is_empty() {
+                files = pick_files()?;
+                if files.is_empty() {
+                    return Ok(());
+                }
+            }
+            let result = send(&daemon, to, files, Kind::File, !gui).await;
+            if gui {
+                desktop_notify(&result);
+            }
+            result?;
+        }
+        Cmd::UpdatePhone { apk, to } => {
+            let apk = match apk {
+                Some(p) => p,
+                None => std::path::PathBuf::from(DEFAULT_APK),
+            };
+            if !apk.is_file() {
+                bail!("нет {apk:?}: собери release-APK или укажи путь");
+            }
+            send(&daemon, to, vec![apk], Kind::AppUpdate, true).await?;
+            println!("Подтверди установку в уведомлении на телефоне.");
+        }
         Cmd::Unlock => {
             if daemon.request_unlock().await? {
                 println!("Разблокировано");
@@ -138,7 +179,43 @@ async fn pair(daemon: &DaemonProxy<'_>, uri_only: bool, light: bool) -> Result<(
     bail!("время ожидания истекло");
 }
 
-async fn send(daemon: &DaemonProxy<'_>, to: Option<String>, files: Vec<std::path::PathBuf>) -> Result<()> {
+/// Путь к release-APK относительно корня проекта.
+const DEFAULT_APK: &str = "android/app/build/outputs/apk/release/app-release.apk";
+
+#[derive(Clone, Copy)]
+enum Kind {
+    File,
+    AppUpdate,
+}
+
+/// Окно выбора файлов (zenity). Пустой список — отмена.
+fn pick_files() -> Result<Vec<std::path::PathBuf>> {
+    let out = std::process::Command::new("zenity")
+        .args(["--file-selection", "--multiple", "--separator=\n", "--title=Отправить на телефон"])
+        .output()
+        .context("нужен zenity для выбора файлов")?;
+    Ok(String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).map(Into::into).collect())
+}
+
+/// Итог отправки уведомлением: когда запускали из трея или файлового менеджера, терминала нет.
+fn desktop_notify(result: &Result<String>) {
+    let (summary, body, icon) = match result {
+        Ok(summary) => (summary.clone(), String::new(), "phone-symbolic"),
+        Err(e) => ("Не удалось отправить".to_string(), format!("{e:#}"), "dialog-error-symbolic"),
+    };
+    let _ = std::process::Command::new("notify-send")
+        .args(["-a", "Linet", "-i", icon, &summary, &body])
+        .status();
+}
+
+/// Отправляет файлы и ждёт итога. Возвращает строку-итог («Отправлено 2 файла на …»).
+async fn send(
+    daemon: &DaemonProxy<'_>,
+    to: Option<String>,
+    files: Vec<std::path::PathBuf>,
+    kind: Kind,
+    tty: bool,
+) -> Result<String> {
     use std::collections::HashSet;
     use std::io::Write;
 
@@ -162,15 +239,22 @@ async fn send(daemon: &DaemonProxy<'_>, to: Option<String>, files: Vec<std::path
     let mut pending = HashSet::new();
     for f in &files {
         let path = std::fs::canonicalize(f).with_context(|| format!("{f:?}"))?;
-        pending.insert(daemon.send_file(&to, &path.to_string_lossy()).await?);
+        let path = path.to_string_lossy();
+        let id = match kind {
+            Kind::File => daemon.send_file(&to, &path).await?,
+            Kind::AppUpdate => daemon.send_app_update(&to, &path).await?,
+        };
+        pending.insert(id);
     }
+    let total = pending.len();
+    let mut peer = String::new();
 
     let mut failed = 0;
     while !pending.is_empty() {
         tokio::select! {
             Some(sig) = progress.next() => {
                 let a = sig.args()?;
-                if pending.contains(&a.id) && a.total > 0 {
+                if tty && pending.contains(&a.id) && a.total > 0 {
                     let pct = a.done * 100 / a.total;
                     print!("\r{}: {pct}% ({} / {})   ", a.name, human(a.done), human(a.total));
                     std::io::stdout().flush()?;
@@ -179,11 +263,16 @@ async fn send(daemon: &DaemonProxy<'_>, to: Option<String>, files: Vec<std::path
             Some(sig) = finished.next() => {
                 let a = sig.args()?;
                 if pending.remove(&a.id) {
+                    peer = a.peer.clone();
                     if a.ok {
-                        println!("\r{}: отправлено ({})          ", a.name, a.peer);
+                        if tty {
+                            println!("\r{}: отправлено ({})          ", a.name, a.peer);
+                        }
                     } else {
                         failed += 1;
-                        println!("\r{}: ошибка: {}          ", a.name, a.detail);
+                        if tty {
+                            println!("\r{}: ошибка: {}          ", a.name, a.detail);
+                        }
                     }
                 }
             }
@@ -191,9 +280,9 @@ async fn send(daemon: &DaemonProxy<'_>, to: Option<String>, files: Vec<std::path
         }
     }
     if failed > 0 {
-        bail!("не отправлено файлов: {failed}");
+        bail!("не отправлено файлов: {failed} из {total}");
     }
-    Ok(())
+    Ok(if total == 1 { format!("Отправлено на {peer}") } else { format!("Отправлено файлов: {total}, на {peer}") })
 }
 
 fn human(bytes: u64) -> String {

@@ -46,6 +46,7 @@ class NotifyListener : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification, rankingMap: RankingMap) {
         if (Linet.status.value !is Status.Connected || sbn.packageName == packageName) return
+        if (NotifyFilter.isMuted(this, sbn.packageName)) return
         val n = sbn.notification
         val skipFlags = Notification.FLAG_ONGOING_EVENT or Notification.FLAG_FOREGROUND_SERVICE or
             Notification.FLAG_GROUP_SUMMARY
@@ -64,6 +65,7 @@ class NotifyListener : NotificationListenerService() {
         if (lastSent[sbn.key] == hash) return
         lastSent[sbn.key] = hash
 
+        NotifyFilter.remember(this, sbn.packageName, label(sbn.packageName))
         val acts = n.actions?.toList().orEmpty()
         actions[sbn.key] = acts
         val buttons = acts.mapIndexed { i, a ->

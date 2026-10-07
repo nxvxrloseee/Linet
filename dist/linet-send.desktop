@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Отправить на телефон
+GenericName=Linet
+Comment=Отправить файлы на сопряжённый телефон
+Icon=phone
+Exec=@LINETCTL@ send --notify %F
+Terminal=false
+Categories=Utility;
+MimeType=application/octet-stream;application/pdf;application/zip;image/png;image/jpeg;image/webp;image/gif;video/mp4;video/x-matroska;audio/mpeg;audio/flac;text/plain;
+Keywords=linet;phone;android;send;телефон;отправить;

@@ -13,8 +13,10 @@ pub trait Daemon {
     fn ping(&self, id: &str) -> zbus::Result<f64>;
     fn unpair(&self, id: &str) -> zbus::Result<()>;
     fn send_file(&self, id: &str, path: &str) -> zbus::Result<u64>;
+    fn send_app_update(&self, id: &str, path: &str) -> zbus::Result<u64>;
     fn send_url(&self, id: &str, url: &str, title: &str) -> zbus::Result<()>;
     fn request_unlock(&self) -> zbus::Result<bool>;
+    fn battery(&self, id: &str) -> zbus::Result<(i32, bool)>;
 
     #[zbus(signal)]
     fn transfer_progress(&self, id: u64, peer: String, name: String, incoming: bool, done: u64, total: u64)

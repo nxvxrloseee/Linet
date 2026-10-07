@@ -50,6 +50,11 @@ object Transfers {
             }
             is TransferStatus.Done -> {
                 finish(context, t)
+                if (t.incoming && t.purpose == "app-update" && s.path != null) {
+                    nm.cancel(notificationId(t))
+                    AppUpdate.install(context, File(s.path!!))
+                    return
+                }
                 val saved = s.path?.let { saveToDownloads(context, File(it), t.name) }
                 nm.notify(notificationId(t), doneNotification(context, t, saved))
             }

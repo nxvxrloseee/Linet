@@ -10,6 +10,7 @@ use zbus::object_server::{InterfaceRef, SignalEmitter};
 
 use crate::daemon::Daemon;
 use crate::mirror::Mirror;
+use crate::tray::Tray;
 use crate::unlock::Unlocker;
 use crate::notify::{Notice, NoticeEvent, Notifier, xdg_open};
 
@@ -62,12 +63,27 @@ impl Api {
         if !path.is_absolute() {
             return Err(fdo::Error::InvalidArgs("нужен абсолютный путь".into()));
         }
-        self.daemon.send_file(id, path).await.map_err(err)
+        self.daemon.send_file(id, path, None).await.map_err(err)
+    }
+
+    /// Отправить APK как обновление приложения на телефоне.
+    async fn send_app_update(&self, id: &str, path: &str) -> fdo::Result<u64> {
+        let path = Path::new(path);
+        if !path.is_absolute() || path.extension().is_none_or(|e| e != "apk") {
+            return Err(fdo::Error::InvalidArgs("нужен абсолютный путь к .apk".into()));
+        }
+        self.daemon.send_file(id, path, Some(linet_core::files::PURPOSE_APP_UPDATE)).await.map_err(err)
     }
 
     /// Открыть ссылку на устройстве. Пустой `id` — единственное подключённое.
     async fn send_url(&self, id: &str, url: &str, title: &str) -> fdo::Result<()> {
         self.daemon.send_url(id, url, title).await.map_err(err)
+    }
+
+    /// (заряд в процентах или -1, заряжается)
+    async fn battery(&self, id: &str) -> fdo::Result<(i32, bool)> {
+        let b = self.daemon.battery(id).map_err(err)?;
+        Ok(b.map(|(l, c)| (i32::from(l), c)).unwrap_or((-1, false)))
     }
 
     /// Попросить телефон разблокировать экран. `true` — разблокировано.
@@ -129,6 +145,22 @@ pub async fn serve(
     if let Some(n) = &notifier {
         daemon.set_notifier(n.clone(), Mirror::new(n.clone(), cache_dir()));
     }
+    // Клик по значку в трее: выбрать файлы и отправить на телефон.
+    let tray = Tray::start(&conn, || {
+        // У systemd в PATH нет ~/.cargo/bin: linetctl лежит рядом с демоном.
+        let linetctl = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("linetctl")))
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| "linetctl".into());
+        let _ = std::process::Command::new(linetctl)
+            .args(["send", "--pick"])
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .map(|mut c| std::thread::spawn(move || c.wait()));
+    })
+    .await;
+    daemon.set_tray(tray);
     tokio::spawn(forward_transfers(iface, notifier, transfers));
     Ok(conn)
 }

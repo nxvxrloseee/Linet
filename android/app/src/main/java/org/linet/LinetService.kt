@@ -16,6 +16,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.ServiceCompat
@@ -57,6 +58,30 @@ class LinetService : Service() {
         }
     }
 
+    /** Последний отправленный заряд: шлём только изменения (шаг 1 % или зарядка). */
+    private var battery: Pair<Int, Boolean>? = null
+
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100).coerceAtLeast(1)
+            val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) * 100 / scale
+            val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+            val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                status == BatteryManager.BATTERY_STATUS_FULL
+            if (level < 0) return
+            val now = level to charging
+            if (now != battery) {
+                battery = now
+                sendBattery()
+            }
+        }
+    }
+
+    private fun sendBattery() {
+        val (level, charging) = battery ?: return
+        Linet.client(this).sendBattery(level.coerceIn(0, 100).toUByte(), charging)
+    }
+
     override fun onCreate() {
         super.onCreate()
         createChannel()
@@ -77,11 +102,18 @@ class LinetService : Service() {
             this, screenOn, IntentFilter(Intent.ACTION_SCREEN_ON), ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         discovery = Discovery(this)
+        // BATTERY_CHANGED рассылает сама система; липкий интент сразу даёт текущий заряд.
+        ContextCompat.registerReceiver(
+            this, batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
 
         scope.launch {
             Linet.status.distinctUntilChanged { a, b -> a::class == b::class }.collect { status ->
                 getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(status))
-                if (status is Status.Connected) discovery?.stop()
+                if (status is Status.Connected) {
+                    discovery?.stop()
+                    sendBattery()
+                }
             }
         }
     }
@@ -130,6 +162,7 @@ class LinetService : Service() {
         if (::connectivity.isInitialized) {
             connectivity.unregisterNetworkCallback(wifiCallback)
             unregisterReceiver(screenOn)
+            unregisterReceiver(batteryReceiver)
         }
         super.onDestroy()
     }

@@ -75,10 +75,10 @@ async fn main() -> Result<()> {
                     ClientEvent::Connected(peer) => {
                         println!("подключено к {}", peer.name);
                         if let Cmd::Send { file } = &args.cmd {
-                            let f = tokio::fs::File::open(file).await?;
-                            let size = f.metadata().await?.len();
+                            let f = std::fs::File::open(file)?;
+                            let size = f.metadata()?.len();
                             let name = file.file_name().unwrap().to_string_lossy();
-                            client.send_file(f, &name, size, "application/octet-stream").await?;
+                            client.send_file(f, &name, size, "application/octet-stream", None).await?;
                             return Ok(());
                         }
                         if once {

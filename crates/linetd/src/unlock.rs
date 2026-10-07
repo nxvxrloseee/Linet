@@ -172,6 +172,18 @@ pub async fn is_locked() -> bool {
     }
 }
 
+/// Заблокировать экран (Caelestia, иначе через logind — его слушают hyprlock и др.).
+pub async fn lock() -> Result<()> {
+    if caelestia("lock").await.is_some() {
+        return Ok(());
+    }
+    let status = Command::new("loginctl").arg("lock-session").status().await?;
+    if !status.success() {
+        bail!("loginctl lock-session не сработал");
+    }
+    Ok(())
+}
+
 async fn unlock() -> Result<()> {
     if caelestia("isLocked").await.is_some() {
         caelestia("unlock").await.ok_or_else(|| anyhow::anyhow!("Caelestia не разблокировал экран"))?;

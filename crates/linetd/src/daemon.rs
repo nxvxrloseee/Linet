@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use linet_core::client::CLOSE_UNPAIRED;
-use linet_core::files::Transfers;
+use linet_core::files::{SEND_ATTEMPTS, Transfers};
 use linet_core::pairing::{self, Invite};
 use linet_core::store::now_unix;
 use linet_core::tls::{self, ClientPolicy};
@@ -17,11 +17,25 @@ use tokio::sync::watch;
 use crate::clipboard::Clipboard;
 use crate::mirror::Mirror;
 use crate::notify::{Handler, Notice, NoticeEvent, Notifier};
+use crate::tray::Tray;
 
 pub const PAIRING_WINDOW: Duration = Duration::from_secs(120);
 const PAIRING_CONFIRM: Duration = Duration::from_secs(60);
+/// Сколько ждать телефон, чтобы докачать прерванную отправку.
+const RESUME_WAIT: Duration = Duration::from_secs(120);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_BAD_HANDSHAKE: u32 = 2;
+
+/// Уведомлять о заряде на этих порогах; выше `LOW_BATTERY_RESET` — сброс.
+const LOW_BATTERY: &[u8] = &[20, 10];
+const LOW_BATTERY_RESET: u8 = 25;
+
+struct BatteryState {
+    level: u8,
+    charging: bool,
+    /// Последний порог, о котором уже уведомили.
+    warned_at: Option<u8>,
+}
 
 struct PairingWindow {
     invite: Invite,
@@ -40,6 +54,8 @@ pub struct Daemon {
     mirror: OnceLock<Arc<Mirror>>,
     notifier: OnceLock<Notifier>,
     clipboard: Option<Arc<Clipboard>>,
+    tray: OnceLock<Tray>,
+    battery: Mutex<HashMap<Fingerprint, BatteryState>>,
     /// Счётчик изменений списка устройств — для D-Bus-сигнала.
     changed: watch::Sender<u64>,
 }
@@ -71,6 +87,8 @@ impl Daemon {
             mirror: OnceLock::new(),
             notifier: OnceLock::new(),
             clipboard,
+            tray: OnceLock::new(),
+            battery: Mutex::new(HashMap::new()),
             changed: watch::channel(0).0,
         })
     }
@@ -86,6 +104,64 @@ impl Daemon {
     pub fn set_notifier(&self, notifier: Notifier, mirror: Arc<Mirror>) {
         let _ = self.notifier.set(notifier);
         let _ = self.mirror.set(mirror);
+    }
+
+    /// (заряд, заряжается) устройства, если оно его сообщало.
+    pub fn battery(&self, id: &str) -> Result<Option<(u8, bool)>> {
+        let peer = self.find(id)?;
+        Ok(self.battery.lock().unwrap().get(&peer.fingerprint).map(|b| (b.level, b.charging)))
+    }
+
+    async fn on_battery(&self, session: &Session, level: u8, charging: bool) {
+        let fp = session.peer();
+        let warn = {
+            let mut map = self.battery.lock().unwrap();
+            let b = map.entry(fp).or_insert(BatteryState { level, charging, warned_at: None });
+            b.level = level;
+            b.charging = charging;
+            if charging || level > LOW_BATTERY_RESET {
+                b.warned_at = None;
+                None
+            } else {
+                // Каждый порог — одно уведомление, пока телефон не поставят на зарядку.
+                let threshold = LOW_BATTERY.iter().copied().filter(|&t| level <= t).min();
+                match threshold {
+                    Some(t) if b.warned_at.is_none_or(|w| t < w) => {
+                        b.warned_at = Some(t);
+                        Some(level)
+                    }
+                    _ => None,
+                }
+            }
+        };
+        if let Some(tray) = self.tray.get() {
+            tray.update(|t| t.battery = Some((level, charging))).await;
+        }
+        if let (Some(level), Some(n)) = (warn, self.notifier.get()) {
+            let summary = format!("{}: батарея {level} %", session.hello().name);
+            let notice = Notice {
+                app: "Linet",
+                summary: &summary,
+                body: "Телефон скоро разрядится",
+                icon: "battery-caution-symbolic",
+                actions: &[],
+                replaces: 0,
+            };
+            let _ = n.show(notice, None).await;
+        }
+    }
+
+    pub fn set_tray(&self, tray: Tray) {
+        let _ = self.tray.set(tray);
+    }
+
+    /// Единственный подключённый телефон, если он один.
+    pub fn phone_session(&self) -> Option<Arc<Session>> {
+        self.session("").ok()
+    }
+
+    pub fn session_of(&self, fp: &Fingerprint) -> Option<Arc<Session>> {
+        self.sessions.lock().unwrap().get(fp).cloned()
     }
 
     pub fn connected(&self) -> bool {
@@ -200,23 +276,63 @@ impl Daemon {
     }
 
     /// Начинает отправку и сразу возвращает id передачи; ход — через прогресс-колбэк.
-    pub async fn send_file(&self, id: &str, path: &std::path::Path) -> Result<u64> {
+    /// Если связь рвётся посреди передачи, ждёт переподключения и докачивает.
+    pub async fn send_file(self: &Arc<Self>, id: &str, path: &std::path::Path, purpose: Option<&str>) -> Result<u64> {
         let session = self.session(id)?;
-        let file = tokio::fs::File::open(path).await.with_context(|| format!("{path:?}"))?;
-        let meta = file.metadata().await?;
+        let file = std::fs::File::open(path).with_context(|| format!("{path:?}"))?;
+        let meta = file.metadata()?;
         if !meta.is_file() {
             bail!("{path:?} — не файл");
         }
         let name = path.file_name().context("нет имени файла")?.to_string_lossy().into_owned();
         let mime = mime_guess::from_path(path).first_or_octet_stream().to_string();
-        let transfers = self.transfers.clone();
-        let transfer = transfers.new_id();
+        let purpose = purpose.map(str::to_string);
+        let transfer = self.transfers.new_id();
+        let this = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = transfers.send(&session, transfer, file, &name, meta.len(), &mime).await {
-                tracing::warn!(%name, "отправка: {e:#}");
+            let mut session = session;
+            for attempt in 1..=SEND_ATTEMPTS {
+                let last = attempt == SEND_ATTEMPTS;
+                let reader = match file.try_clone() {
+                    Ok(f) => tokio::fs::File::from_std(f),
+                    Err(e) => return tracing::warn!(%name, "отправка: {e}"),
+                };
+                let res = this
+                    .transfers
+                    .send(&session, transfer, reader, &name, meta.len(), &mime, purpose.as_deref(), last)
+                    .await;
+                match res {
+                    Ok(()) => return,
+                    Err(e) if last || session.connection().close_reason().is_none() => {
+                        return tracing::warn!(%name, "отправка: {e:#}");
+                    }
+                    Err(e) => {
+                        tracing::info!(%name, attempt, "связь оборвалась, докачаю после переподключения: {e:#}");
+                        match this.wait_new_session(&session, RESUME_WAIT).await {
+                            Some(s) => session = s,
+                            None => return tracing::warn!(%name, "телефон не вернулся, отправка прервана"),
+                        }
+                    }
+                }
             }
         });
         Ok(transfer)
+    }
+
+    /// Ждёт новый сеанс того же устройства после обрыва.
+    async fn wait_new_session(&self, old: &Arc<Session>, timeout: Duration) -> Option<Arc<Session>> {
+        let deadline = Instant::now() + timeout;
+        let mut changes = self.subscribe();
+        loop {
+            let current = self.sessions.lock().unwrap().get(&old.peer()).cloned();
+            if let Some(s) = current.filter(|s| !Arc::ptr_eq(s, old)) {
+                return Some(s);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || tokio::time::timeout(left, changes.changed()).await.is_err() {
+                return None;
+            }
+        }
     }
 
     pub fn unpair(&self, id: &str) -> Result<()> {
@@ -353,10 +469,27 @@ impl Daemon {
         }
         tracing::info!(name = %session.hello().name, %remote, "подключено");
         self.notify_changed();
+        if let Some(tray) = self.tray.get() {
+            let name = session.hello().name.clone();
+            tray.update(|t| {
+                t.phone = Some(name);
+                t.battery = None;
+            })
+            .await;
+        }
 
         while let Some(inbound) = events.recv().await {
             let Some(env) = self.transfers.handle(&session, inbound) else { continue };
             let rest = match (env.body, &self.clipboard) {
+                (Message::Battery { level, charging }, _) => {
+                    self.on_battery(&session, level, charging).await;
+                    None
+                }
+                (Message::ClipboardImage { mime, data }, Some(clipboard)) => {
+                    tracing::debug!(%mime, len = data.len(), "картинка из буфера телефона");
+                    clipboard.set_image(&mime, &data).await;
+                    None
+                }
                 (Message::Clipboard { text }, Some(clipboard)) => {
                     tracing::debug!(len = text.len(), "буфер обмена с телефона");
                     clipboard.set(text).await;
@@ -372,10 +505,18 @@ impl Daemon {
             }
         }
 
-        {
+        let gone = {
             let mut sessions = self.sessions.lock().unwrap();
-            if sessions.get(&fp).is_some_and(|s| Arc::ptr_eq(s, &session)) {
+            let ours = sessions.get(&fp).is_some_and(|s| Arc::ptr_eq(s, &session));
+            if ours {
                 sessions.remove(&fp);
+            }
+            ours
+        };
+        if gone {
+            self.battery.lock().unwrap().remove(&fp);
+            if let Some(tray) = self.tray.get() {
+                tray.update(|t| *t = Default::default()).await;
             }
         }
         tracing::info!(name = %session.hello().name, reason = ?session.connection().close_reason(), "отключено");

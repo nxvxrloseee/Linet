@@ -67,6 +67,8 @@ pub struct TransferInfo {
     pub incoming: bool,
     pub done: u64,
     pub total: u64,
+    /// Назначение передачи: "app-update" — обновление приложения.
+    pub purpose: Option<String>,
     pub status: TransferStatus,
 }
 
@@ -77,7 +79,16 @@ impl From<TransferUpdate> for TransferInfo {
             TransferState::Done { path } => TransferStatus::Done { path: path.map(|p| p.display().to_string()) },
             TransferState::Failed(reason) => TransferStatus::Failed { reason },
         };
-        Self { id: u.id, peer: u.peer, name: u.name, incoming: u.incoming, done: u.done, total: u.total, status }
+        Self {
+            id: u.id,
+            peer: u.peer,
+            name: u.name,
+            incoming: u.incoming,
+            done: u.done,
+            total: u.total,
+            purpose: u.purpose,
+            status,
+        }
     }
 }
 
@@ -131,6 +142,8 @@ pub trait EventListener: Send + Sync {
     fn on_notification_dismiss(&self, key: String);
     /// На ноутбуке скопировали текст.
     fn on_clipboard(&self, text: String);
+    /// На ноутбуке скопировали картинку.
+    fn on_clipboard_image(&self, mime: String, data: Vec<u8>);
     /// Ноутбук передал страницу («продолжить на телефоне»).
     fn on_handoff(&self, url: String, title: String);
     /// Ноутбук просит разблокировать экран. Ответить — `answer_unlock(request_id, …)`.
@@ -215,6 +228,9 @@ impl LinetClient {
                             }
                             Message::NotificationDismiss { key } => listener.on_notification_dismiss(key),
                             Message::Clipboard { text } => listener.on_clipboard(text),
+                            Message::ClipboardImage { mime, data } => {
+                                listener.on_clipboard_image(mime, data.into_vec())
+                            }
                             Message::Handoff { url, title } => listener.on_handoff(url, title),
                             Message::UnlockRequest { host } => listener.on_unlock_request(env.id, host),
                             other => tracing::debug!("сообщение: {other:?}"),
@@ -268,8 +284,7 @@ impl LinetClient {
     pub fn send_fd(&self, fd: i32, name: String, size: u64, mime: String) -> Result<u64> {
         // SAFETY: Kotlin передаёт fd из ParcelFileDescriptor.detachFd() и больше его не использует.
         let file = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
-        let reader = tokio::fs::File::from_std(file);
-        let id = self.rt.block_on(self.client.send_file(reader, &name, size, &mime))?;
+        let id = self.rt.block_on(self.client.send_file(file, &name, size, &mime, None))?;
         Ok(id)
     }
 
@@ -290,6 +305,16 @@ impl LinetClient {
         connected
     }
 
+    /// Отправить картинку в буфер обмена ноутбука. `false` — нет соединения или слишком большая.
+    pub fn send_clipboard_image(&self, mime: String, data: Vec<u8>) -> bool {
+        if data.len() > linet_core::proto::MAX_CLIPBOARD_IMAGE {
+            return false;
+        }
+        let connected = self.client.session().is_some();
+        self.send_quietly(Message::ClipboardImage { mime, data: serde_bytes::ByteBuf::from(data) });
+        connected
+    }
+
     /// Открыть ссылку на ноутбуке. `false` — нет соединения.
     pub fn send_handoff(&self, url: String, title: String) -> bool {
         let connected = self.client.session().is_some();
@@ -305,6 +330,11 @@ impl LinetClient {
                 tracing::debug!("ответ на разблокировку: {e:#}");
             }
         });
+    }
+
+    /// Сообщить ноутбуку заряд батареи. Без соединения — ничего.
+    pub fn send_battery(&self, level: u8, charging: bool) {
+        self.send_quietly(Message::Battery { level, charging });
     }
 
     /// Время отклика ноутбука в миллисекундах.

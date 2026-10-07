@@ -1,9 +1,12 @@
+mod autolock;
 mod clipboard;
 mod daemon;
 mod dbus;
+mod idle;
 mod mirror;
 mod netwatch;
 mod notify;
+mod tray;
 mod unlock;
 
 use std::path::PathBuf;
@@ -40,6 +43,9 @@ struct Args {
     /// Не разблокировать экран телефоном
     #[arg(long)]
     no_unlock: bool,
+    /// Не блокировать экран, когда телефон уходит
+    #[arg(long)]
+    no_autolock: bool,
 }
 
 fn hostname() -> String {
@@ -110,9 +116,16 @@ async fn main() -> Result<()> {
     let daemon = Daemon::new(identity, store, hello, args.port, transfers, clipboard.clone());
     if let Some(clipboard) = clipboard {
         let d = daemon.clone();
-        clipboard.watch(move |text| {
+        clipboard.watch(move |event| {
+            let msg = match event {
+                clipboard::ClipEvent::Text(text) => linet_core::Message::Clipboard { text },
+                clipboard::ClipEvent::Cleared => linet_core::Message::Clipboard { text: String::new() },
+                clipboard::ClipEvent::Image { mime, data } => {
+                    linet_core::Message::ClipboardImage { mime, data: serde_bytes::ByteBuf::from(data) }
+                }
+            };
             let d = d.clone();
-            tokio::spawn(async move { d.broadcast(linet_core::Message::Clipboard { text }).await });
+            tokio::spawn(async move { d.broadcast(msg).await });
         });
     }
 
@@ -120,6 +133,9 @@ async fn main() -> Result<()> {
         .with_context(|| format!("не удалось занять UDP-порт {}", args.port))?;
     tracing::info!(%id, %name, port = args.port, "linetd запущен");
 
+    if !args.no_autolock {
+        autolock::spawn(daemon.clone());
+    }
     let unlocker = unlock::Unlocker::new(daemon.clone());
     if !args.no_unlock {
         unlocker.clone().watch();

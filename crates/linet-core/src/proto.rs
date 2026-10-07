@@ -83,8 +83,21 @@ pub enum Message {
     Pong,
     /// Предложение файла. Данные идут отдельным однонаправленным потоком:
     /// `u64 big-endian id ‖ содержимое`.
-    FileOffer { id: u64, name: String, size: u64, mime: String },
-    FileAccept { id: u64 },
+    FileOffer {
+        id: u64,
+        name: String,
+        size: u64,
+        mime: String,
+        /// Назначение: `None` — обычный файл, `"app-update"` — обновление приложения.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        purpose: Option<String>,
+    },
+    /// `offset` > 0 — у получателя уже есть начало файла, слать с этого байта.
+    FileAccept {
+        id: u64,
+        #[serde(default)]
+        offset: u64,
+    },
     FileReject { id: u64, reason: String },
     /// Уведомление телефона (новое или обновлённое — по тому же `key`).
     Notification(Notification),
@@ -101,9 +114,16 @@ pub enum Message {
     /// Ноутбук → телефон: можно ли разблокировать экран? Ответ — `UnlockResponse`.
     UnlockRequest { host: String },
     UnlockResponse { approved: bool, reason: String },
+    /// Телефон → ноутбук: заряд батареи (при подключении и при изменении).
+    Battery { level: u8, charging: bool },
+    /// Картинка в буфере обмена (PNG/JPEG, до `MAX_CLIPBOARD_IMAGE`).
+    ClipboardImage { mime: String, data: ByteBuf },
     #[serde(other)]
     Unknown,
 }
+
+/// Самая большая картинка буфера обмена: идёт одним сообщением управляющего потока.
+pub const MAX_CLIPBOARD_IMAGE: usize = 12 << 20;
 
 pub fn encode(env: &Envelope) -> anyhow::Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(64);

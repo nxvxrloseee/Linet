@@ -10,7 +10,7 @@ use quinn::{Connection, Endpoint};
 use serde_bytes::ByteBuf;
 use tokio::sync::{Notify, mpsc};
 
-use crate::files::Transfers;
+use crate::files::{SEND_ATTEMPTS, Transfers};
 use crate::identity::{Fingerprint, Identity};
 use crate::pairing::{self, Invite};
 use crate::proto::{Envelope, Hello, Message};
@@ -23,6 +23,9 @@ const BACKOFF_MIN: Duration = Duration::from_secs(2);
 /// Потолок паузы между попытками. Во сне телефона таймер всё равно стоит,
 /// так что лишних пробуждений это не вызывает.
 const BACKOFF_MAX: Duration = Duration::from_secs(5 * 60);
+
+/// Сколько ждать переподключения, чтобы продолжить прерванную отправку.
+const RESUME_WAIT: Duration = Duration::from_secs(120);
 
 /// Код закрытия QUIC: сервер забыл это устройство.
 pub const CLOSE_UNPAIRED: u32 = 1;
@@ -167,17 +170,52 @@ impl Client {
     }
 
     /// Отправляет файл на ноутбук. Возвращает id передачи после доставки.
+    /// Отправляет файл на ноутбук. Если связь рвётся посреди передачи, ждёт
+    /// переподключения и продолжает с места обрыва (до `SEND_ATTEMPTS` раз).
+    /// Возвращает id передачи после доставки.
     pub async fn send_file(
         &self,
-        reader: impl tokio::io::AsyncRead + Unpin,
+        file: std::fs::File,
         name: &str,
         size: u64,
         mime: &str,
+        purpose: Option<&str>,
     ) -> Result<u64> {
-        let session = self.session().context("нет соединения с ноутбуком")?;
         let id = self.transfers.new_id();
-        self.transfers.send(&session, id, reader, name, size, mime).await?;
-        Ok(id)
+        for attempt in 1..=SEND_ATTEMPTS {
+            let last = attempt == SEND_ATTEMPTS;
+            let session = self.wait_session(None).await.context("нет соединения с ноутбуком")?;
+            let reader = tokio::fs::File::from_std(file.try_clone()?);
+            match self.transfers.send(&session, id, reader, name, size, mime, purpose, last).await {
+                Ok(()) => return Ok(id),
+                // Сеанс жив — ошибка не от обрыва связи, повтор не поможет.
+                Err(e) if last || session.connection().close_reason().is_none() => return Err(e),
+                Err(e) => {
+                    tracing::info!(%name, attempt, "связь оборвалась, продолжу после переподключения: {e:#}");
+                    if self.wait_session(Some(&session)).await.is_none() {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        unreachable!("последняя попытка всегда возвращает результат")
+    }
+
+    /// Ждёт сеанс (новый, если передан старый) до `RESUME_WAIT`.
+    async fn wait_session(&self, old: Option<&Arc<Session>>) -> Option<Arc<Session>> {
+        let deadline = tokio::time::Instant::now() + RESUME_WAIT;
+        loop {
+            if let Some(s) = self.session()
+                && old.is_none_or(|o| !Arc::ptr_eq(o, &s))
+            {
+                return Some(s);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            self.kick();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     }
 
     async fn connect(&self, peer: &PeerRecord) -> Result<(Arc<Session>, mpsc::Receiver<Inbound>)> {

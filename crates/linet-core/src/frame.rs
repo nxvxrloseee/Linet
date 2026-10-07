@@ -5,8 +5,9 @@ use quinn::{ReadExactError, RecvStream, SendStream};
 
 use crate::proto::{self, Envelope};
 
-/// Защита от мусора и злонамеренных пиров: крупные данные идут отдельными потоками.
-pub const MAX_FRAME: usize = 1 << 20;
+/// Защита от мусора и злонамеренных пиров. Файлы идут отдельными потоками,
+/// но картинка буфера обмена — одним сообщением, отсюда запас.
+pub const MAX_FRAME: usize = 16 << 20;
 
 pub async fn write(stream: &mut SendStream, env: &Envelope) -> Result<()> {
     let body = proto::encode(env)?;

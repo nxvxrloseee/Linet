@@ -70,6 +70,11 @@ object Linet {
             ClipboardSync.apply(context, text)
         }
 
+        override fun onClipboardImage(mime: String, data: ByteArray) {
+            // Запись файла — не на потоке Rust.
+            Thread { ClipboardSync.applyImage(context, mime, data) }.start()
+        }
+
         override fun onHandoff(url: String, title: String) {
             Handoff.show(context, url, title)
         }

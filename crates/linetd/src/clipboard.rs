@@ -1,11 +1,13 @@
 //! Буфер обмена Wayland через wl-clipboard (протокол data-control, Hyprland его поддерживает).
+//! Синхронизируются текст и картинки.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use linet_core::proto::MAX_CLIPBOARD_IMAGE;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 /// Больше в буфер обычно кладут случайно (лог, дамп); такое не синхронизируем.
@@ -15,20 +17,35 @@ const CLEAR_POLL_EVERY: Duration = Duration::from_secs(5);
 /// 2 минуты — столько телефон готов очищать полученный текст.
 const CLEAR_POLLS: usize = 24;
 
-type OnChange = Arc<dyn Fn(String) + Send + Sync>;
+/// Что поменялось в буфере ноутбука.
+pub enum ClipEvent {
+    Text(String),
+    Image { mime: String, data: Vec<u8> },
+    /// Буфер очищен — очистить и копию на телефоне.
+    Cleared,
+}
 
-/// На каждое изменение wl-paste запускает эту команду с содержимым на stdin:
+type OnChange = Arc<dyn Fn(ClipEvent) + Send + Sync>;
+
+/// Текст: wl-paste на каждое изменение запускает команду с содержимым на stdin —
 /// `состояние\n` + текст + `\0`. NUL в text/plain не встречается.
-const WATCH_SCRIPT: &str = r#"printf '%s\n' "$CLIPBOARD_STATE"; cat; printf '\0'"#;
+const TEXT_SCRIPT: &str = r#"printf '%s\n' "$CLIPBOARD_STATE"; cat; printf '\0'"#;
+
+/// Картинка: в двоичных данных NUL бывает, поэтому сначала строка-заголовок
+/// `состояние размер mime\n`, затем ровно `размер` байт.
+const IMAGE_SCRIPT: &str = r#"f=$(mktemp) || exit 0; cat > "$f"
+mime=$(wl-paste --list-types 2>/dev/null | grep -m1 '^image/')
+printf '%s %s %s\n' "$CLIPBOARD_STATE" "$(stat -c %s "$f")" "${mime:-image/png}"
+cat "$f"; rm -f "$f""#;
 
 pub struct Clipboard {
-    /// Хеш последнего синхронизированного текста — защита от эха.
+    /// Хеш последнего синхронизированного содержимого — защита от эха.
     last: Mutex<u64>,
 }
 
-fn hash(text: &str) -> u64 {
+fn hash(data: &[u8]) -> u64 {
     let mut h = DefaultHasher::new();
-    text.hash(&mut h);
+    data.hash(&mut h);
     h.finish()
 }
 
@@ -37,9 +54,9 @@ impl Clipboard {
         Arc::new(Self { last: Mutex::new(0) })
     }
 
-    /// Запоминает текст; `false`, если он уже был последним (эхо или повтор).
-    fn remember(&self, text: &str) -> bool {
-        let h = hash(text);
+    /// Запоминает содержимое; `false`, если оно уже было последним (эхо или повтор).
+    fn remember(&self, data: &[u8]) -> bool {
+        let h = hash(data);
         let mut last = self.last.lock().unwrap();
         if *last == h {
             return false;
@@ -48,40 +65,51 @@ impl Clipboard {
         true
     }
 
-    /// Следит за буфером и вызывает `on_change` для нового текста, скопированного на ноутбуке.
-    /// Пустая строка — буфер очищен.
-    pub fn watch(self: Arc<Self>, on_change: impl Fn(String) + Send + Sync + 'static) {
+    /// Следит за буфером и вызывает `on_change` для нового содержимого, скопированного на ноутбуке.
+    pub fn watch(self: Arc<Self>, on_change: impl Fn(ClipEvent) + Send + Sync + 'static) {
         let on_change: OnChange = Arc::new(on_change);
-        tokio::spawn(async move {
-            loop {
-                match self.run_watcher(&on_change).await {
-                    Ok(()) => tracing::debug!("wl-paste завершился, перезапуск"),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        tracing::warn!("wl-paste не найден, синхронизация буфера отключена");
-                        return;
+        for images in [false, true] {
+            let (this, on_change) = (self.clone(), on_change.clone());
+            tokio::spawn(async move {
+                loop {
+                    let res = if images {
+                        this.run_image_watcher(&on_change).await
+                    } else {
+                        this.run_text_watcher(&on_change).await
+                    };
+                    match res {
+                        Ok(()) => tracing::debug!(images, "wl-paste завершился, перезапуск"),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            tracing::warn!("wl-paste не найден, синхронизация буфера отключена");
+                            return;
+                        }
+                        Err(e) => tracing::warn!("wl-paste: {e}"),
                     }
-                    Err(e) => tracing::warn!("wl-paste: {e}"),
+                    tokio::time::sleep(RESTART_DELAY).await;
                 }
-                tokio::time::sleep(RESTART_DELAY).await;
-            }
-        });
+            });
+        }
     }
 
     /// Буфер очищен — очищаем и копию на телефоне, если там лежит текст отсюда.
     fn cleared(&self, on_change: &OnChange) {
         if std::mem::take(&mut *self.last.lock().unwrap()) != 0 {
             tracing::info!("буфер очищен, очищаю копию на телефоне");
-            on_change(String::new());
+            on_change(ClipEvent::Cleared);
         }
     }
 
-    async fn run_watcher(self: &Arc<Self>, on_change: &OnChange) -> std::io::Result<()> {
-        let mut child = Command::new("wl-paste")
-            .args(["--type", "text", "--watch", "sh", "-c", WATCH_SCRIPT])
+    fn spawn_watcher(kind: &str, script: &str) -> std::io::Result<tokio::process::Child> {
+        Command::new("wl-paste")
+            .args(["--type", kind, "--watch", "sh", "-c", script])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
-            .spawn()?;
+            .spawn()
+    }
+
+    async fn run_text_watcher(self: &Arc<Self>, on_change: &OnChange) -> std::io::Result<()> {
+        let mut child = Self::spawn_watcher("text", TEXT_SCRIPT)?;
         let mut out = BufReader::new(child.stdout.take().expect("stdout piped"));
         let mut first = true;
         loop {
@@ -96,9 +124,7 @@ impl Clipboard {
             body.pop();
             // Первое событие — то, что лежало в буфере до запуска: это не новое копирование.
             if std::mem::take(&mut first) {
-                if let Ok(text) = String::from_utf8(body) {
-                    self.remember(&text);
-                }
+                self.remember(&body);
                 continue;
             }
             // "sensitive" — пароль из менеджера паролей с пометкой: не пересылаем.
@@ -111,11 +137,42 @@ impl Clipboard {
                 self.cleared(on_change);
                 continue;
             }
-            if text.len() > MAX_TEXT || !self.remember(&text) {
+            if text.len() > MAX_TEXT || !self.remember(text.as_bytes()) {
                 continue;
             }
-            on_change(text);
+            on_change(ClipEvent::Text(text));
             self.clone().watch_for_clear(on_change.clone());
+        }
+        child.wait().await?;
+        Ok(())
+    }
+
+    async fn run_image_watcher(self: &Arc<Self>, on_change: &OnChange) -> std::io::Result<()> {
+        let mut child = Self::spawn_watcher("image", IMAGE_SCRIPT)?;
+        let mut out = BufReader::new(child.stdout.take().expect("stdout piped"));
+        let mut first = true;
+        loop {
+            let mut header = String::new();
+            if out.read_line(&mut header).await? == 0 {
+                break;
+            }
+            let mut parts = header.split_whitespace();
+            let (Some(state), Some(size), Some(mime)) = (parts.next(), parts.next(), parts.next()) else {
+                // Поток рассинхронизировался — перезапускаем наблюдателя.
+                break;
+            };
+            let Ok(size) = size.parse::<usize>() else { break };
+            let mut data = vec![0u8; size];
+            out.read_exact(&mut data).await?;
+            if std::mem::take(&mut first) {
+                self.remember(&data);
+                continue;
+            }
+            if state != "data" || data.is_empty() || data.len() > MAX_CLIPBOARD_IMAGE || !self.remember(&data) {
+                continue;
+            }
+            tracing::debug!(%mime, size, "картинка в буфере");
+            on_change(ClipEvent::Image { mime: mime.to_string(), data });
         }
         child.wait().await?;
         Ok(())
@@ -150,21 +207,37 @@ impl Clipboard {
 
     /// Кладёт текст с телефона в буфер ноутбука.
     pub async fn set(&self, text: String) {
-        if text.is_empty() || text.len() > MAX_TEXT || !self.remember(&text) {
+        if text.is_empty() || text.len() > MAX_TEXT || !self.remember(text.as_bytes()) {
             return;
         }
-        let child = Command::new("wl-copy").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
-        let mut child = match child {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("wl-copy: {e}");
-                return;
-            }
-        };
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes()).await;
-        }
-        // wl-copy форкается и сам обслуживает буфер; родитель завершается сразу.
-        let _ = child.wait().await;
+        copy(None, text.as_bytes()).await;
     }
+
+    /// Кладёт картинку с телефона в буфер ноутбука.
+    pub async fn set_image(&self, mime: &str, data: &[u8]) {
+        if !mime.starts_with("image/") || data.len() > MAX_CLIPBOARD_IMAGE || !self.remember(data) {
+            return;
+        }
+        copy(Some(mime), data).await;
+    }
+}
+
+async fn copy(mime: Option<&str>, data: &[u8]) {
+    let mut cmd = Command::new("wl-copy");
+    if let Some(mime) = mime {
+        cmd.args(["--type", mime]);
+    }
+    let child = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("wl-copy: {e}");
+            return;
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(data).await;
+    }
+    // wl-copy форкается и сам обслуживает буфер; родитель завершается сразу.
+    let _ = child.wait().await;
 }

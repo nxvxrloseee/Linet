@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Картинки буфера обмена с ноутбука: отдаются другим приложениям через FileProvider. -->
+<paths>
+    <cache-path name="clip" path="clip/" />
+</paths>

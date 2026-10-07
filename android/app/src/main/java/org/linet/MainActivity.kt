@@ -200,12 +200,35 @@ private fun NotificationsCard() {
     val context = LocalContext.current
     var enabled by remember { mutableStateOf(NotifyListener.isEnabled(context)) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { enabled = NotifyListener.isEnabled(context) }
-    if (enabled) return
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Уведомления на ноутбуке", style = MaterialTheme.typography.titleMedium)
-            Text("Разреши Linet доступ к уведомлениям, чтобы видеть их на ноутбуке и отвечать оттуда.")
-            Button(onClick = { NotifyListener.openSettings(context) }) { Text("Разрешить") }
+            if (!enabled) {
+                Text("Разреши Linet доступ к уведомлениям, чтобы видеть их на ноутбуке и отвечать оттуда.")
+                Button(onClick = { NotifyListener.openSettings(context) }) { Text("Разрешить") }
+                return@Column
+            }
+            val apps = remember { NotifyFilter.seen(context) }
+            var expanded by remember { mutableStateOf(false) }
+            if (apps.isEmpty()) {
+                Text("Здесь появятся приложения, от которых приходили уведомления.", style = MaterialTheme.typography.bodySmall)
+                return@Column
+            }
+            OutlinedButton(onClick = { expanded = !expanded }) {
+                Text(if (expanded) "Скрыть приложения" else "Какие приложения пересылать (${apps.size})")
+            }
+            if (expanded) {
+                apps.forEach { (pkg, label) ->
+                    var on by remember(pkg) { mutableStateOf(!NotifyFilter.isMuted(context, pkg)) }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(label, Modifier.weight(1f))
+                        Switch(checked = on, onCheckedChange = {
+                            on = it
+                            NotifyFilter.setMuted(context, pkg, !it)
+                        })
+                    }
+                }
+            }
         }
     }
 }
