@@ -4,6 +4,7 @@
 pub mod client;
 pub mod files;
 pub mod frame;
+pub mod hint;
 pub mod identity;
 pub mod pairing;
 pub mod proto;

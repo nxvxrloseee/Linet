@@ -155,6 +155,7 @@ impl Client {
             kind: hello.kind,
             addrs,
             paired_at: now_unix(),
+            cert: crate::tls::peer_cert(&conn).map(|c| hex::encode(c.as_ref())),
         };
         self.store.lock().unwrap().upsert(record.clone())?;
         self.kick();
@@ -189,8 +190,12 @@ impl Client {
         let Message::Hello(server_hello) = reply.body else {
             bail!("ожидался Hello, пришло {:?}", reply.body);
         };
-        if addrs.first() != Some(&addr) {
-            self.store.lock().unwrap().update(&peer.fingerprint, |p| promote(&mut p.addrs, addr))?;
+        let cert = crate::tls::peer_cert(&conn).map(|c| hex::encode(c.as_ref()));
+        if addrs.first() != Some(&addr) || peer.cert != cert {
+            self.store.lock().unwrap().update(&peer.fingerprint, |p| {
+                promote(&mut p.addrs, addr);
+                p.cert = cert;
+            })?;
         }
         Ok(Session::spawn(conn, tx, rx, peer.fingerprint, server_hello, 1))
     }
@@ -238,6 +243,12 @@ impl Client {
             tokio::select! {
                 _ = tokio::time::sleep(backoff) => {}
                 _ = self.kick.notified() => backoff = BACKOFF_MIN,
+                Some(addr) = wait_hint(&peer) => {
+                    tracing::info!(%addr, "подсказка адреса от ноутбука");
+                    let _ = self.store.lock().unwrap().update(&peer.fingerprint, |p| promote(&mut p.addrs, addr));
+                    backoff = BACKOFF_MIN;
+                    continue;
+                }
             }
             backoff = (backoff * 2).min(BACKOFF_MAX);
         }
@@ -248,4 +259,31 @@ fn promote(addrs: &mut Vec<String>, addr: SocketAddr) {
     let s = addr.to_string();
     addrs.retain(|a| a != &s);
     addrs.insert(0, s);
+}
+
+/// Ждёт подписанную подсказку адреса ноутбука на интерфейсе своей точки доступа.
+/// Сокет открыт только пока нет соединения и только если точка доступа включена:
+/// в чужих сетях телефон этот порт не слушает.
+async fn wait_hint(peer: &PeerRecord) -> Option<SocketAddr> {
+    let Some(cert) = peer.cert.as_deref().and_then(|c| hex::decode(c).ok()) else {
+        return std::future::pending().await;
+    };
+    let Some(local) = crate::hint::tether_addrs().into_iter().next() else {
+        return std::future::pending().await;
+    };
+    let socket = match tokio::net::UdpSocket::bind((local, crate::hint::HINT_PORT)).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("порт подсказок: {e}");
+            return std::future::pending().await;
+        }
+    };
+    let mut buf = [0u8; 128];
+    loop {
+        let Ok((n, src)) = socket.recv_from(&mut buf).await else { continue };
+        let SocketAddr::V4(src) = src else { continue };
+        if let Some(port) = crate::hint::verify(&buf[..n], *src.ip(), &cert, now_unix()) {
+            return Some(SocketAddr::from((*src.ip(), port)));
+        }
+    }
 }

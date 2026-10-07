@@ -2,6 +2,7 @@ mod clipboard;
 mod daemon;
 mod dbus;
 mod mirror;
+mod netwatch;
 mod notify;
 mod unlock;
 
@@ -70,13 +71,13 @@ fn downloads_dir() -> Result<PathBuf> {
     Ok(home.join("Downloads"))
 }
 
-fn advertise(id: &str, name: &str, port: u16) -> Result<mdns_sd::ServiceDaemon> {
-    let mdns = mdns_sd::ServiceDaemon::new()?;
+/// Описание mDNS-сервиса. Регистрирует его netwatch — только в доверенных сетях.
+fn mdns_service(id: &str, name: &str, port: u16) -> Result<netwatch::Mdns> {
+    let daemon = mdns_sd::ServiceDaemon::new()?;
     let host = format!("{}.local.", hostname());
     let props = [("id", id), ("v", "1")];
-    let info = mdns_sd::ServiceInfo::new(MDNS_TYPE, name, &host, "", port, &props[..])?.enable_addr_auto();
-    mdns.register(info)?;
-    Ok(mdns)
+    let service = mdns_sd::ServiceInfo::new(MDNS_TYPE, name, &host, "", port, &props[..])?.enable_addr_auto();
+    Ok(netwatch::Mdns { daemon, service })
 }
 
 #[tokio::main]
@@ -124,11 +125,12 @@ async fn main() -> Result<()> {
         unlocker.clone().watch();
     }
     let _dbus = dbus::serve(daemon.clone(), unlocker, updates_rx).await.context("D-Bus: демон уже запущен?")?;
-    let _mdns = if args.no_mdns {
+    let mdns = if args.no_mdns {
         None
     } else {
-        advertise(&id, &name, args.port).map_err(|e| tracing::warn!("mDNS: {e:#}")).ok()
+        mdns_service(&id, &name, args.port).map_err(|e| tracing::warn!("mDNS: {e:#}")).ok()
     };
+    netwatch::NetWatch::new(daemon.clone(), args.port, mdns, dir.clone()).spawn();
 
     let server = tokio::spawn(daemon.serve(endpoint.clone()));
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;

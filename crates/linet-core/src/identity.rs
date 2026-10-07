@@ -112,6 +112,15 @@ impl Identity {
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key_pkcs8.clone()))
     }
 
+    /// Подпись Ed25519 ключом устройства.
+    pub fn sign(&self, msg: &[u8]) -> Result<[u8; 64]> {
+        let key = ring::signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(&self.key_pkcs8)
+            .map_err(|e| anyhow::anyhow!("ключ Ed25519: {e}"))?;
+        let mut out = [0u8; 64];
+        out.copy_from_slice(key.sign(msg).as_ref());
+        Ok(out)
+    }
+
     /// Ключ для stateless reset в QUIC, детерминированный от ключа устройства.
     /// Благодаря ему после перезапуска демона телефон сразу узнаёт, что старое
     /// соединение мертво, а не ждёт idle-таймаута.

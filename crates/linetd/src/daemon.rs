@@ -88,6 +88,10 @@ impl Daemon {
         let _ = self.mirror.set(mirror);
     }
 
+    pub fn connected(&self) -> bool {
+        !self.sessions.lock().unwrap().is_empty()
+    }
+
     /// Отправить сообщение всем подключённым устройствам.
     pub async fn broadcast(&self, msg: Message) {
         let sessions: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
@@ -290,6 +294,7 @@ impl Daemon {
             kind: hello.kind,
             addrs: Vec::new(),
             paired_at: now_unix(),
+            cert: None,
         })?;
         tracing::info!(name = %hello.name, id = %fp.device_id(), "новое устройство сопряжено");
         self.notify_changed();

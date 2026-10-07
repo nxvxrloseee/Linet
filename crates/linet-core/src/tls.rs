@@ -130,8 +130,13 @@ impl ServerCertVerifier for PinnedServerVerifier {
     }
 }
 
+/// DER-сертификат пира из установленного QUIC-соединения.
+pub fn peer_cert(conn: &quinn::Connection) -> Option<CertificateDer<'static>> {
+    let certs = conn.peer_identity()?.downcast::<Vec<CertificateDer<'static>>>().ok()?;
+    certs.first().cloned()
+}
+
 /// Отпечаток пира из установленного QUIC-соединения.
 pub fn peer_fingerprint(conn: &quinn::Connection) -> Option<Fingerprint> {
-    let certs = conn.peer_identity()?.downcast::<Vec<CertificateDer<'static>>>().ok()?;
-    certs.first().map(|c| Fingerprint::of_cert(c))
+    peer_cert(conn).map(|c| Fingerprint::of_cert(&c))
 }

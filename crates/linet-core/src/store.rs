@@ -17,6 +17,9 @@ pub struct PeerRecord {
     #[serde(default)]
     pub addrs: Vec<String>,
     pub paired_at: u64,
+    /// DER-сертификат в hex: нужен клиенту, чтобы проверять подписанные подсказки адреса.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert: Option<String>,
 }
 
 impl PeerRecord {
