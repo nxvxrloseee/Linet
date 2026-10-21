@@ -25,7 +25,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Высота второго монитора в логических точках, на которую рассчитаны окна
 /// настольных приложений: меньше — и диалоги не помещаются.
 const MIN_LOGICAL_HEIGHT: u32 = 720;
-const MAX_FPS: &str = "30";
+/// 60 кадров: новый кадр приходит в среднем на ~16 мс раньше, чем при 30.
+const MAX_FPS: &str = "60";
 
 struct Running {
     child: Child,
@@ -82,8 +83,9 @@ impl Vnc {
             .arg(format!("--config={}", config.display()))
             .arg(format!("--output={output}"))
             .arg(format!("--socket={}", socket.display()))
+            // Курсор не вшиваем в картинку (--render-cursor): его рисует клиент,
+            // и он двигается сразу, не дожидаясь кадра от ноутбука.
             .arg(format!("--max-fps={MAX_FPS}"))
-            .arg("--render-cursor")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true)
