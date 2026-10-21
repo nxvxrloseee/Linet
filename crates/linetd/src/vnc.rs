@@ -22,8 +22,9 @@ const PORT: u16 = 5910;
 const HEADLESS: &str = "LINET-PHONE";
 /// Сколько ждать подключения клиента, прежде чем закрыть wayvnc.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
-/// Масштаб второго монитора: экран телефона маленький, иначе всё мелко.
-const EXTEND_SCALE: f32 = 2.0;
+/// Высота второго монитора в логических точках, на которую рассчитаны окна
+/// настольных приложений: меньше — и диалоги не помещаются.
+const MIN_LOGICAL_HEIGHT: u32 = 720;
 const MAX_FPS: &str = "30";
 
 struct Running {
@@ -314,11 +315,12 @@ async fn create_headless(width: u32, height: u32) -> Result<()> {
     if !String::from_utf8_lossy(&out.stdout).contains("ok") {
         bail!("Hyprland не создал виртуальный монитор");
     }
-    // Ориентация — как держат телефон: портретный телефон даёт портретный монитор.
-    let (w, h) = (width.clamp(360, 3840), height.clamp(360, 3840));
+    // Всегда альбомный: настольные приложения под узкий портретный экран не рассчитаны.
+    let (w, h) = (width.max(height).clamp(640, 3840), width.min(height).clamp(360, 2160));
+    let scale = pick_scale(w, h);
     // Lua-конфиг Hyprland: настройка монитора через eval, а не keyword.
     let lua = format!(
-        r#"hl.monitor({{ output = "{HEADLESS}", mode = "{w}x{h}@60", position = "auto-right", scale = {EXTEND_SCALE} }})"#
+        r#"hl.monitor({{ output = "{HEADLESS}", mode = "{w}x{h}@60", position = "auto-right", scale = {scale} }})"#
     );
     Command::new("hyprctl").args(["eval", &lua]).output().await?;
     // Hyprland применяет режим не мгновенно. Если запустить wayvnc раньше, он
@@ -337,6 +339,19 @@ async fn create_headless(width: u32, height: u32) -> Result<()> {
     bail!("Hyprland не применил размер {w}×{h} к виртуальному монитору")
 }
 
+/// Самый крупный масштаб (чтобы на маленьком экране не было мелко), при котором
+/// высота не меньше `MIN_LOGICAL_HEIGHT`, а размеры делятся без остатка —
+/// Hyprland принимает только такие масштабы.
+fn pick_scale(w: u32, h: u32) -> f64 {
+    const CANDIDATES: &[f64] = &[2.0, 1.875, 1.8, 1.75, 1.6, 1.5, 1.25, 1.2, 1.0];
+    let exact = |v: u32, s: f64| ((f64::from(v) / s).fract()).abs() < 1e-9;
+    CANDIDATES
+        .iter()
+        .copied()
+        .find(|&s| f64::from(h) / s >= f64::from(MIN_LOGICAL_HEIGHT) && exact(w, s) && exact(h, s))
+        .unwrap_or(1.0)
+}
+
 async fn wait_listening(addr: SocketAddr) -> Result<()> {
     for _ in 0..30 {
         if tokio::net::TcpStream::connect(addr).await.is_ok() {
@@ -349,6 +364,13 @@ async fn wait_listening(addr: SocketAddr) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scale_fits_desktop_apps() {
+        assert_eq!(super::pick_scale(2704, 1216), 1.6); // POCO X6 Pro → 1690×760
+        assert_eq!(super::pick_scale(2400, 1080), 1.5); // 1600×720
+        assert_eq!(super::pick_scale(1280, 720), 1.0);
+    }
+
     #[test]
     fn combined_layout_written() {
         let dir = std::env::temp_dir().join(format!("linet-xkb-{}", std::process::id()));
