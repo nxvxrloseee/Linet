@@ -71,6 +71,7 @@ impl Vnc {
              private_key_file={k}/tls_key.pem\ncertificate_file={k}/tls_cert.pem\nrsa_private_key_file={k}/rsa_key.pem\n",
             k = self.keys.display()
         );
+        let body = body + &keyboard_config().await;
         linet_core::store::write_private(&config, body.as_bytes())?;
 
         let child = Command::new("wayvnc")
@@ -181,6 +182,27 @@ impl Vnc {
         }
         Ok(())
     }
+}
+
+/// Раскладки клавиатуры как в Hyprland (например, `us,ru`). По VNC телефон шлёт
+/// символы, а wayvnc ищет для них клавишу в своей раскладке — без `ru` кириллицу
+/// набрать нельзя.
+async fn keyboard_config() -> String {
+    async fn option(name: &str) -> Option<String> {
+        let out = Command::new("hyprctl").args(["getoption", name, "-j"]).output().await.ok()?;
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+        let s = v["str"].as_str()?.trim().to_string();
+        (!s.is_empty() && s != "[[EMPTY]]").then_some(s)
+    }
+    let mut cfg = String::new();
+    for (hypr, key) in
+        [("input:kb_layout", "xkb_layout"), ("input:kb_variant", "xkb_variant"), ("input:kb_options", "xkb_options")]
+    {
+        if let Some(v) = option(hypr).await {
+            cfg += &format!("{key}={v}\n");
+        }
+    }
+    cfg
 }
 
 /// Адрес ноутбука на интерфейсе, через который виден телефон.
