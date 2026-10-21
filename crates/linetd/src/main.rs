@@ -86,8 +86,33 @@ fn mdns_service(id: &str, name: &str, port: u16) -> Result<netwatch::Mdns> {
     Ok(netwatch::Mdns { daemon, service })
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Демону не нужна параллельность: два рабочих потока вместо числа ядер.
+const WORKER_THREADS: usize = 2;
+
+/// glibc по умолчанию держит отдельную арену на поток и после освобождения
+/// крупного буфера (картинка из буфера обмена — мегабайты) поднимает порог mmap,
+/// так что следующие такие буферы оседают в аренах и не возвращаются системе.
+/// За дни это давало сотни мегабайт RSS. Фиксированный порог и две арены это лечат.
+fn tune_malloc() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: mallopt вызывается до создания потоков и меняет только настройки аллокатора.
+    unsafe {
+        libc::mallopt(libc::M_ARENA_MAX, 2);
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 1 << 20);
+        libc::mallopt(libc::M_TRIM_THRESHOLD, 4 << 20);
+    }
+}
+
+fn main() -> Result<()> {
+    tune_malloc();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(WORKER_THREADS)
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<()> {
     // Под systemd вывод идёт в журнал, цветовые коды там только мешают.
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))

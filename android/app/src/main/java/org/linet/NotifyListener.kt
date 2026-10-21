@@ -38,6 +38,10 @@ class NotifyListener : NotificationListenerService() {
 
     override fun onListenerConnected() {
         instance = this
+        // Сразу заполнить список фильтра теми, чьи уведомления уже в шторке.
+        runCatching { activeNotifications }.getOrNull()?.forEach {
+            if (it.packageName != packageName) NotifyFilter.remember(this, it.packageName, label(it.packageName))
+        }
     }
 
     override fun onListenerDisconnected() {

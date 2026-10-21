@@ -14,10 +14,9 @@ pub async fn write(stream: &mut SendStream, env: &Envelope) -> Result<()> {
     if body.len() > MAX_FRAME {
         bail!("сообщение слишком большое: {} байт", body.len());
     }
-    let mut buf = Vec::with_capacity(4 + body.len());
-    buf.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    buf.extend_from_slice(&body);
-    stream.write_all(&buf).await?;
+    // Две записи вместо склейки: не копируем крупное тело (картинку) ещё раз.
+    stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
+    stream.write_all(&body).await?;
     Ok(())
 }
 

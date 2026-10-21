@@ -34,6 +34,8 @@ enum Cmd {
     Ping,
     /// Подключиться, отправить файл и выйти
     Send { file: PathBuf },
+    /// Нагрузочный тест: отправить `count` картинок буфера обмена по `mb` МБ
+    SpamImages { count: usize, mb: usize },
     Unpair,
 }
 
@@ -65,7 +67,7 @@ async fn main() -> Result<()> {
             println!("Сопряжено с {} ({})", peer.name, peer.id());
         }
         Cmd::Unpair => client.unpair()?,
-        Cmd::Run | Cmd::Ping | Cmd::Send { .. } => {
+        Cmd::Run | Cmd::Ping | Cmd::Send { .. } | Cmd::SpamImages { .. } => {
             let once = !matches!(args.cmd, Cmd::Run);
             let (tx, mut rx) = mpsc::channel(16);
             let runner = client.clone();
@@ -74,6 +76,20 @@ async fn main() -> Result<()> {
                 match ev {
                     ClientEvent::Connected(peer) => {
                         println!("подключено к {}", peer.name);
+                        if let Cmd::SpamImages { count, mb } = &args.cmd {
+                            let session = client.session().unwrap();
+                            for i in 0..*count {
+                                let data = vec![(i % 251) as u8; mb << 20];
+                                let msg = linet_core::Message::ClipboardImage {
+                                    mime: "image/png".into(),
+                                    data: serde_bytes::ByteBuf::from(data),
+                                };
+                                session.send(msg).await?;
+                            }
+                            session.ping().await?;
+                            println!("отправлено {count} × {mb} МБ");
+                            return Ok(());
+                        }
                         if let Cmd::Send { file } = &args.cmd {
                             let f = std::fs::File::open(file)?;
                             let size = f.metadata()?.len();

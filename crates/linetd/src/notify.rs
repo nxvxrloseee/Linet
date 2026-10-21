@@ -44,6 +44,8 @@ pub enum NoticeEvent<'a> {
 }
 
 pub const CLOSED_BY_USER: u32 = 2;
+/// Сколько уведомлений помнить с обработчиками кнопок.
+const MAX_HANDLERS: usize = 200;
 
 pub type Handler = Box<dyn Fn(NoticeEvent) + Send + Sync>;
 
@@ -131,7 +133,15 @@ impl Notifier {
         let id = self.proxy.notify(&app, notice.replaces, notice.icon, &summary, &body, &actions, hints, -1).await?;
         let mut handlers = self.handlers.lock().unwrap();
         match handler {
-            Some(handler) => drop(handlers.insert(id, handler)),
+            Some(handler) => {
+                handlers.insert(id, handler);
+                // Caelestia хранит уведомления и не закрывает их, так что обработчики
+                // копились бы бесконечно. Старым кнопкам за таким пределом уже не до нажатий.
+                while handlers.len() > MAX_HANDLERS {
+                    let Some(&oldest) = handlers.keys().min() else { break };
+                    handlers.remove(&oldest);
+                }
+            }
             None => drop(handlers.remove(&id)),
         }
         Ok(id)

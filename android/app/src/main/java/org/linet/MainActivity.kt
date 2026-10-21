@@ -208,10 +208,15 @@ private fun NotificationsCard() {
                 Button(onClick = { NotifyListener.openSettings(context) }) { Text("Разрешить") }
                 return@Column
             }
-            val apps = remember { NotifyFilter.seen(context) }
+            var apps by remember { mutableStateOf(NotifyFilter.seen(context)) }
+            LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { apps = NotifyFilter.seen(context) }
             var expanded by remember { mutableStateOf(false) }
             if (apps.isEmpty()) {
-                Text("Здесь появятся приложения, от которых приходили уведомления.", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "Пока пусто: здесь появятся приложения, от которых приходили уведомления, " +
+                        "и для каждого можно будет выключить пересылку.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 return@Column
             }
             OutlinedButton(onClick = { expanded = !expanded }) {

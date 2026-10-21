@@ -9,6 +9,9 @@ use linet_core::{Message, Notification, Session};
 
 use crate::notify::{CLOSED_BY_USER, Handler, Notice, NoticeEvent, Notifier, prompt};
 
+/// Сколько отзеркаленных уведомлений помнить (для замены и закрытия).
+const MAX_SHOWN: usize = 200;
+
 pub struct Mirror {
     notifier: Notifier,
     icons: PathBuf,
@@ -87,7 +90,15 @@ impl Mirror {
         let notice =
             Notice { app: &n.app, summary: &n.title, body: &n.text, icon: &icon, actions: &actions, replaces };
         match self.notifier.show(notice, Some(handler(Arc::downgrade(session), &n, self.shown.clone()))).await {
-            Ok(id) => drop(self.shown.lock().unwrap().insert(n.key, id)),
+            Ok(id) => {
+                let mut shown = self.shown.lock().unwrap();
+                shown.insert(n.key, id);
+                // Те же соображения, что у обработчиков в Notifier: не копить бесконечно.
+                while shown.len() > MAX_SHOWN {
+                    let Some(oldest) = shown.iter().min_by_key(|(_, id)| **id).map(|(k, _)| k.clone()) else { break };
+                    shown.remove(&oldest);
+                }
+            }
             Err(e) => tracing::warn!("уведомление: {e}"),
         }
     }

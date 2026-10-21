@@ -21,3 +21,4 @@ mime_guess = "2"
 futures-util = { version = "0.3", default-features = false }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+libc = "0.2"
