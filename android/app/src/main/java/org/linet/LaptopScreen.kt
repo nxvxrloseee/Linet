@@ -17,9 +17,9 @@ object LaptopScreen {
     private const val AVNC = "com.gaurav.avnc"
 
     suspend fun open(activity: Activity, extend: Boolean) {
-        // Второй монитор — по размеру экрана телефона в альбомной ориентации.
+        // Второй монитор — по размеру и ориентации экрана телефона прямо сейчас.
         val bounds = activity.windowManager.currentWindowMetrics.bounds
-        val (w, h) = maxOf(bounds.width(), bounds.height()) to minOf(bounds.width(), bounds.height())
+        val (w, h) = bounds.width() to bounds.height()
         val url = withContext(Dispatchers.IO) {
             try {
                 Result.success(Linet.client(activity).requestVnc(extend, w.toUInt(), h.toUInt()))

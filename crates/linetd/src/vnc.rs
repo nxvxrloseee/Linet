@@ -71,10 +71,13 @@ impl Vnc {
              private_key_file={k}/tls_key.pem\ncertificate_file={k}/tls_cert.pem\nrsa_private_key_file={k}/rsa_key.pem\n",
             k = self.keys.display()
         );
-        let body = body + &keyboard_config().await;
+        let xkb_dir = self.keys.join("xkb");
+        let body = body + &keyboard_config(&xkb_dir).await;
         linet_core::store::write_private(&config, body.as_bytes())?;
 
         let child = Command::new("wayvnc")
+            // Отсюда libxkbcommon берёт нашу раскладку «linet».
+            .env("XKB_CONFIG_EXTRA_PATH", &xkb_dir)
             .arg(format!("--config={}", config.display()))
             .arg(format!("--output={output}"))
             .arg(format!("--socket={}", socket.display()))
@@ -184,25 +187,87 @@ impl Vnc {
     }
 }
 
-/// Раскладки клавиатуры как в Hyprland (например, `us,ru`). По VNC телефон шлёт
-/// символы, а wayvnc ищет для них клавишу в своей раскладке — без `ru` кириллицу
-/// набрать нельзя.
-async fn keyboard_config() -> String {
+/// Раскладки клавиатуры для wayvnc. По VNC телефон шлёт символы, а wayvnc ищет
+/// для них клавишу в раскладке своей виртуальной клавиатуры.
+///
+/// С двумя раскладками (`us,ru`) wayvnc путается: набрав кириллицу, он остаётся
+/// в группе `ru`, а точку ищет в `us` — и вместо «.» печатается «ю». Поэтому при
+/// русской раскладке даём ему одну группу, где на каждой клавише и латиница,
+/// и кириллица (уровни 3–4), — переключать группы не придётся.
+async fn keyboard_config(xkb_dir: &Path) -> String {
     async fn option(name: &str) -> Option<String> {
         let out = Command::new("hyprctl").args(["getoption", name, "-j"]).output().await.ok()?;
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
         let s = v["str"].as_str()?.trim().to_string();
         (!s.is_empty() && s != "[[EMPTY]]").then_some(s)
     }
+    let layouts = option("input:kb_layout").await.unwrap_or_default();
+    if layouts.split(',').any(|l| l.trim() == "ru") && write_combined_layout(xkb_dir).is_ok() {
+        return format!("xkb_layout={COMBINED_LAYOUT}\n");
+    }
     let mut cfg = String::new();
-    for (hypr, key) in
-        [("input:kb_layout", "xkb_layout"), ("input:kb_variant", "xkb_variant"), ("input:kb_options", "xkb_options")]
-    {
+    for (hypr, key) in [("input:kb_layout", "xkb_layout"), ("input:kb_variant", "xkb_variant")] {
         if let Some(v) = option(hypr).await {
             cfg += &format!("{key}={v}\n");
         }
     }
     cfg
+}
+
+const COMBINED_LAYOUT: &str = "linet";
+
+/// ЙЦУКЕН поверх QWERTY: клавиша → (строчная, заглавная).
+const RU_KEYS: &[(&str, &str, &str)] = &[
+    ("TLDE", "Cyrillic_io", "Cyrillic_IO"),
+    ("AD01", "Cyrillic_shorti", "Cyrillic_SHORTI"),
+    ("AD02", "Cyrillic_tse", "Cyrillic_TSE"),
+    ("AD03", "Cyrillic_u", "Cyrillic_U"),
+    ("AD04", "Cyrillic_ka", "Cyrillic_KA"),
+    ("AD05", "Cyrillic_ie", "Cyrillic_IE"),
+    ("AD06", "Cyrillic_en", "Cyrillic_EN"),
+    ("AD07", "Cyrillic_ghe", "Cyrillic_GHE"),
+    ("AD08", "Cyrillic_sha", "Cyrillic_SHA"),
+    ("AD09", "Cyrillic_shcha", "Cyrillic_SHCHA"),
+    ("AD10", "Cyrillic_ze", "Cyrillic_ZE"),
+    ("AD11", "Cyrillic_ha", "Cyrillic_HA"),
+    ("AD12", "Cyrillic_hardsign", "Cyrillic_HARDSIGN"),
+    ("AC01", "Cyrillic_ef", "Cyrillic_EF"),
+    ("AC02", "Cyrillic_yeru", "Cyrillic_YERU"),
+    ("AC03", "Cyrillic_ve", "Cyrillic_VE"),
+    ("AC04", "Cyrillic_a", "Cyrillic_A"),
+    ("AC05", "Cyrillic_pe", "Cyrillic_PE"),
+    ("AC06", "Cyrillic_er", "Cyrillic_ER"),
+    ("AC07", "Cyrillic_o", "Cyrillic_O"),
+    ("AC08", "Cyrillic_el", "Cyrillic_EL"),
+    ("AC09", "Cyrillic_de", "Cyrillic_DE"),
+    ("AC10", "Cyrillic_zhe", "Cyrillic_ZHE"),
+    ("AC11", "Cyrillic_e", "Cyrillic_E"),
+    ("AB01", "Cyrillic_ya", "Cyrillic_YA"),
+    ("AB02", "Cyrillic_che", "Cyrillic_CHE"),
+    ("AB03", "Cyrillic_es", "Cyrillic_ES"),
+    ("AB04", "Cyrillic_em", "Cyrillic_EM"),
+    ("AB05", "Cyrillic_i", "Cyrillic_I"),
+    ("AB06", "Cyrillic_te", "Cyrillic_TE"),
+    ("AB07", "Cyrillic_softsign", "Cyrillic_SOFTSIGN"),
+    ("AB08", "Cyrillic_be", "Cyrillic_BE"),
+    ("AB09", "Cyrillic_yu", "Cyrillic_YU"),
+    ("AE03", "numerosign", "numerosign"),
+];
+
+/// Пишет `<xkb_dir>/symbols/linet`: US, а кириллица — на третьем-четвёртом уровне.
+fn write_combined_layout(xkb_dir: &Path) -> std::io::Result<()> {
+    let mut body = String::from(
+        "// Создано Linet для wayvnc: латиница и кириллица в одной группе.\n\
+         default partial alphanumeric_keys\n\
+         xkb_symbols \"basic\" {\n    include \"us(basic)\"\n    name[Group1] = \"Linet (US + RU)\";\n",
+    );
+    for (key, lower, upper) in RU_KEYS {
+        body += &format!("    key <{key}> {{ type[Group1] = \"FOUR_LEVEL\", [ NoSymbol, NoSymbol, {lower}, {upper} ] }};\n");
+    }
+    body += "    include \"level3(ralt_switch)\"\n};\n";
+    let dir = xkb_dir.join("symbols");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(COMBINED_LAYOUT), body)
 }
 
 /// Адрес ноутбука на интерфейсе, через который виден телефон.
@@ -249,13 +314,27 @@ async fn create_headless(width: u32, height: u32) -> Result<()> {
     if !String::from_utf8_lossy(&out.stdout).contains("ok") {
         bail!("Hyprland не создал виртуальный монитор");
     }
+    // Ориентация — как держат телефон: портретный телефон даёт портретный монитор.
+    let (w, h) = (width.clamp(360, 3840), height.clamp(360, 3840));
     // Lua-конфиг Hyprland: настройка монитора через eval, а не keyword.
-    let (w, h) = (width.max(height).clamp(640, 3840), width.min(height).clamp(360, 2160));
     let lua = format!(
         r#"hl.monitor({{ output = "{HEADLESS}", mode = "{w}x{h}@60", position = "auto-right", scale = {EXTEND_SCALE} }})"#
     );
     Command::new("hyprctl").args(["eval", &lua]).output().await?;
-    Ok(())
+    // Hyprland применяет режим не мгновенно. Если запустить wayvnc раньше, он
+    // захватит монитор ещё в размере по умолчанию, и картинка выйдет обрезанной.
+    for _ in 0..30 {
+        let out = Command::new("hyprctl").args(["monitors", "-j"]).output().await?;
+        let monitors: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+        let ready = monitors.as_array().into_iter().flatten().any(|m| {
+            m["name"] == HEADLESS && m["width"].as_u64() == Some(u64::from(w)) && m["height"].as_u64() == Some(u64::from(h))
+        });
+        if ready {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    bail!("Hyprland не применил размер {w}×{h} к виртуальному монитору")
 }
 
 async fn wait_listening(addr: SocketAddr) -> Result<()> {
@@ -266,4 +345,20 @@ async fn wait_listening(addr: SocketAddr) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     bail!("wayvnc не запустился")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn combined_layout_written() {
+        let dir = std::env::temp_dir().join(format!("linet-xkb-{}", std::process::id()));
+        super::write_combined_layout(&dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("symbols/linet")).unwrap();
+        assert!(text.contains("Cyrillic_zhe") && text.contains("include \"us(basic)\""));
+        if let Ok(out) = std::env::var("LINET_XKB_KEEP") {
+            let _ = std::fs::create_dir_all(&out);
+            std::fs::copy(dir.join("symbols/linet"), std::path::Path::new(&out).join("linet")).unwrap();
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
