@@ -110,6 +110,7 @@ private fun Screen() {
         }
         UpdateCard()
         if (status !is Status.NotPaired) NotificationsCard()
+        if (status is Status.Connected) LaptopScreenCard()
         if (status !is Status.NotPaired) UnlockCard()
         PowerCard()
     }
@@ -264,6 +265,33 @@ private fun UpdateCard() {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Есть обновление Linet", style = MaterialTheme.typography.titleMedium)
             Button(onClick = { AppUpdate.install(context as android.app.Activity) }) { Text("Установить") }
+        }
+    }
+}
+
+@Composable
+private fun LaptopScreenCard() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    fun open(extend: Boolean) {
+        busy = true
+        scope.launch {
+            LaptopScreen.open(context as android.app.Activity, extend)
+            busy = false
+        }
+    }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Экран ноутбука", style = MaterialTheme.typography.titleMedium)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(enabled = !busy, onClick = { open(false) }) { Text("Показать экран") }
+                OutlinedButton(enabled = !busy, onClick = { open(true) }) { Text("Второй монитор") }
+            }
+            Text(
+                "Откроется в VNC-клиенте (AVNC). Закроешь его — ноутбук перестанет показывать экран.",
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }

@@ -34,6 +34,13 @@ enum Cmd {
     Ping,
     /// Подключиться, отправить файл и выйти
     Send { file: PathBuf },
+    /// Запросить экран ноутбука по VNC, вывести ссылку и подождать `secs` секунд
+    Vnc {
+        #[arg(long)]
+        extend: bool,
+        #[arg(long, default_value_t = 10)]
+        secs: u64,
+    },
     /// Нагрузочный тест: отправить `count` картинок буфера обмена по `mb` МБ
     SpamImages { count: usize, mb: usize },
     Unpair,
@@ -67,7 +74,7 @@ async fn main() -> Result<()> {
             println!("Сопряжено с {} ({})", peer.name, peer.id());
         }
         Cmd::Unpair => client.unpair()?,
-        Cmd::Run | Cmd::Ping | Cmd::Send { .. } | Cmd::SpamImages { .. } => {
+        Cmd::Run | Cmd::Ping | Cmd::Send { .. } | Cmd::SpamImages { .. } | Cmd::Vnc { .. } => {
             let once = !matches!(args.cmd, Cmd::Run);
             let (tx, mut rx) = mpsc::channel(16);
             let runner = client.clone();
@@ -76,6 +83,16 @@ async fn main() -> Result<()> {
                 match ev {
                     ClientEvent::Connected(peer) => {
                         println!("подключено к {}", peer.name);
+                        if let Cmd::Vnc { extend, secs } = &args.cmd {
+                            let session = client.session().unwrap();
+                            let req = linet_core::Message::VncRequest { extend: *extend, width: 2704, height: 1216 };
+                            match session.request_slow(req, std::time::Duration::from_secs(15)).await? {
+                                linet_core::Message::VncResult { url, error } => println!("url={url} error={error}"),
+                                other => println!("ответ: {other:?}"),
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(*secs)).await;
+                            return Ok(());
+                        }
                         if let Cmd::SpamImages { count, mb } = &args.cmd {
                             let session = client.session().unwrap();
                             for i in 0..*count {

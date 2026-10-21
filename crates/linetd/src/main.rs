@@ -8,6 +8,7 @@ mod netwatch;
 mod notify;
 mod tray;
 mod unlock;
+mod vnc;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,6 +47,9 @@ struct Args {
     /// Не блокировать экран, когда телефон уходит
     #[arg(long)]
     no_autolock: bool,
+    /// Не показывать экран ноутбука на телефоне (wayvnc)
+    #[arg(long)]
+    no_vnc: bool,
 }
 
 fn hostname() -> String {
@@ -131,7 +135,7 @@ async fn run() -> Result<()> {
         name: name.clone(),
         kind: DeviceKind::Laptop,
         proto: linet_core::PROTO_VERSION,
-        caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into(), "handoff".into(), "unlock".into()],
+        caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into(), "handoff".into(), "unlock".into(), "vnc".into()],
     };
     let id = identity.fingerprint().device_id();
     let (updates_tx, updates_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -152,6 +156,10 @@ async fn run() -> Result<()> {
             let d = d.clone();
             tokio::spawn(async move { d.broadcast(msg).await });
         });
+    }
+
+    if !args.no_vnc {
+        daemon.set_vnc(vnc::Vnc::new(&dir, name.clone()));
     }
 
     let endpoint = transport::server_endpoint(daemon.identity(), daemon.policy(), args.port)

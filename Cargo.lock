@@ -793,6 +793,7 @@ dependencies = [
  "mdns-sd",
  "mime_guess",
  "quinn",
+ "ring",
  "serde_bytes",
  "serde_json",
  "tokio",

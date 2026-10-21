@@ -122,6 +122,13 @@ pub enum Message {
     /// Ответ — `ScreenShareResult`.
     ScreenShare { enable: bool },
     ScreenShareResult { ok: bool, error: String },
+    /// Телефон → ноутбук: показать экран ноутбука по VNC. `extend` — второй монитор
+    /// размером `width`×`height` (пиксели экрана телефона в альбомной ориентации).
+    VncRequest { extend: bool, width: u32, height: u32 },
+    /// Ответ: ссылка `vnc://…` с одноразовым паролем или ошибка.
+    VncResult { url: String, error: String },
+    /// Телефон → ноутбук: закончить показ экрана.
+    VncStop,
     #[serde(other)]
     Unknown,
 }

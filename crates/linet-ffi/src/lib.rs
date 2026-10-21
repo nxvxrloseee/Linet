@@ -207,7 +207,7 @@ impl LinetClient {
             name: device_name,
             kind: DeviceKind::Phone,
             proto: linet_core::PROTO_VERSION,
-            caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into(), "handoff".into(), "unlock".into()],
+            caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into(), "handoff".into(), "unlock".into(), "vnc".into()],
         };
         let progress = listener.clone();
         // Файл сначала ложится в кэш, потом копируется в «Загрузки»: нужен двойной запас места.
@@ -323,6 +323,25 @@ impl LinetClient {
         let connected = self.client.session().is_some();
         self.send_quietly(Message::Handoff { url, title });
         connected
+    }
+
+    /// Попросить ноутбук показать свой экран (`extend` — вторым монитором размером
+    /// `width`×`height`). Блокирует до ответа; возвращает ссылку `vnc://`.
+    pub fn request_vnc(&self, extend: bool, width: u32, height: u32) -> Result<String> {
+        let session = self.client.session().ok_or_else(|| LinetError::Failed("нет соединения с ноутбуком".into()))?;
+        let reply = self.rt.block_on(session.request_slow(
+            Message::VncRequest { extend, width, height },
+            std::time::Duration::from_secs(20),
+        ))?;
+        match reply {
+            Message::VncResult { url, error } if error.is_empty() => Ok(url),
+            Message::VncResult { error, .. } => Err(LinetError::Failed(error)),
+            other => Err(LinetError::Failed(format!("неожиданный ответ: {other:?}"))),
+        }
+    }
+
+    pub fn stop_vnc(&self) {
+        self.send_quietly(Message::VncStop);
     }
 
     pub fn answer_screen_share(&self, request_id: u64, ok: bool, error: String) {

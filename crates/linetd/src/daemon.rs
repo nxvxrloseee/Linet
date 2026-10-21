@@ -18,6 +18,7 @@ use crate::clipboard::Clipboard;
 use crate::mirror::Mirror;
 use crate::notify::{Handler, Notice, NoticeEvent, Notifier};
 use crate::tray::Tray;
+use crate::vnc::Vnc;
 
 pub const PAIRING_WINDOW: Duration = Duration::from_secs(120);
 const PAIRING_CONFIRM: Duration = Duration::from_secs(60);
@@ -55,6 +56,7 @@ pub struct Daemon {
     notifier: OnceLock<Notifier>,
     clipboard: Option<Arc<Clipboard>>,
     tray: OnceLock<Tray>,
+    vnc: OnceLock<Arc<Vnc>>,
     battery: Mutex<HashMap<Fingerprint, BatteryState>>,
     /// Счётчик изменений списка устройств — для D-Bus-сигнала.
     changed: watch::Sender<u64>,
@@ -88,6 +90,7 @@ impl Daemon {
             notifier: OnceLock::new(),
             clipboard,
             tray: OnceLock::new(),
+            vnc: OnceLock::new(),
             battery: Mutex::new(HashMap::new()),
             changed: watch::channel(0).0,
         })
@@ -149,6 +152,32 @@ impl Daemon {
             };
             let _ = n.show(notice, None).await;
         }
+    }
+
+    pub fn set_vnc(&self, vnc: Arc<Vnc>) {
+        let _ = self.vnc.set(vnc);
+    }
+
+    /// Запрос телефона показать экран ноутбука.
+    async fn on_vnc_request(&self, session: &Session, request: u64, extend: bool, width: u32, height: u32) {
+        let reply = match self.vnc.get() {
+            None => Message::VncResult { url: String::new(), error: "показ экрана выключен".into() },
+            Some(vnc) => {
+                let ip = session.connection().remote_address().ip();
+                let ip = match ip {
+                    std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(std::net::IpAddr::V4).unwrap_or(ip),
+                    v4 => v4,
+                };
+                match vnc.start(ip, extend, width, height).await {
+                    Ok(url) => Message::VncResult { url, error: String::new() },
+                    Err(e) => {
+                        tracing::warn!("показ экрана: {e:#}");
+                        Message::VncResult { url: String::new(), error: format!("{e:#}") }
+                    }
+                }
+            }
+        };
+        let _ = session.reply(request, reply).await;
     }
 
     pub fn set_tray(&self, tray: Tray) {
@@ -499,6 +528,16 @@ impl Daemon {
         while let Some(inbound) = events.recv().await {
             let Some(env) = self.transfers.handle(&session, inbound) else { continue };
             let rest = match (env.body, &self.clipboard) {
+                (Message::VncRequest { extend, width, height }, _) => {
+                    self.on_vnc_request(&session, env.id, extend, width, height).await;
+                    None
+                }
+                (Message::VncStop, _) => {
+                    if let Some(vnc) = self.vnc.get() {
+                        vnc.stop().await;
+                    }
+                    None
+                }
                 (Message::Battery { level, charging }, _) => {
                     self.on_battery(&session, level, charging).await;
                     None
@@ -533,6 +572,10 @@ impl Daemon {
         };
         if gone {
             self.battery.lock().unwrap().remove(&fp);
+            // Телефон ушёл — экран ноутбука больше никому не показываем.
+            if let Some(vnc) = self.vnc.get() {
+                vnc.stop().await;
+            }
             if let Some(tray) = self.tray.get() {
                 tray.update(|t| *t = Default::default()).await;
             }
