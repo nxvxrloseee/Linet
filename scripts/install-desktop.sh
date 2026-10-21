@@ -5,9 +5,11 @@ cd "$(dirname "$0")/.."
 apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 mkdir -p "$apps"
 LINETCTL="${LINETCTL:-$(command -v linetctl || echo "$HOME/.cargo/bin/linetctl")}"
-sed "s|@LINETCTL@|$LINETCTL|" dist/linet-send.desktop > "$apps/linet-send.desktop"
+for f in dist/linet-*.desktop; do
+    sed "s|@LINETCTL@|$LINETCTL|" "$f" > "$apps/$(basename "$f")"
+done
 update-desktop-database "$apps" 2>/dev/null || true
-echo "Меню и «Открыть с помощью»: $apps/linet-send.desktop"
+echo "Меню запуска и «Открыть с помощью»: $apps/linet-*.desktop"
 
 scripts="${XDG_DATA_HOME:-$HOME/.local/share}/nautilus/scripts"
 mkdir -p "$scripts"

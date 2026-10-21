@@ -56,6 +56,7 @@ object Linet {
             }
             if (state is ConnState.Unpaired) LinetService.stop(context)
             if (state is ConnState.Connected) NotifyListener.onConnected()
+            if (state !is ConnState.Connected) ScreenShare.disconnected(context)
         }
 
         override fun onNotificationAction(key: String, action: UInt, reply: String?) {
@@ -77,6 +78,11 @@ object Linet {
 
         override fun onHandoff(url: String, title: String) {
             Handoff.show(context, url, title)
+        }
+
+        override fun onScreenShare(requestId: ULong, enable: Boolean) {
+            val error = ScreenShare.set(context, enable)
+            instance?.answerScreenShare(requestId, error == null, error.orEmpty())
         }
 
         override fun onUnlockRequest(requestId: ULong, host: String) {

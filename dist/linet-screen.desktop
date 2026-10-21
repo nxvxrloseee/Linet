@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Экран телефона
+GenericName=Linet
+Comment=Показать экран телефона на ноутбуке и управлять им
+Icon=phone
+Exec=@LINETCTL@ screen --notify
+Terminal=false
+Categories=Utility;
+Keywords=linet;phone;scrcpy;mirror;телефон;экран;

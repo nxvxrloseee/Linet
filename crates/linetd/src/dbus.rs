@@ -80,6 +80,11 @@ impl Api {
         self.daemon.send_url(id, url, title).await.map_err(err)
     }
 
+    /// Включить/выключить беспроводную отладку на телефоне. Возвращает его IP.
+    async fn screen_share(&self, enable: bool) -> fdo::Result<String> {
+        self.daemon.screen_share(enable).await.map_err(err)
+    }
+
     /// (заряд в процентах или -1, заряжается)
     async fn battery(&self, id: &str) -> fdo::Result<(i32, bool)> {
         let b = self.daemon.battery(id).map_err(err)?;

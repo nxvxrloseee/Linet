@@ -118,6 +118,10 @@ pub enum Message {
     Battery { level: u8, charging: bool },
     /// Картинка в буфере обмена (PNG/JPEG, до `MAX_CLIPBOARD_IMAGE`).
     ClipboardImage { mime: String, data: ByteBuf },
+    /// Ноутбук → телефон: включить/выключить беспроводную отладку (для scrcpy).
+    /// Ответ — `ScreenShareResult`.
+    ScreenShare { enable: bool },
+    ScreenShareResult { ok: bool, error: String },
     #[serde(other)]
     Unknown,
 }

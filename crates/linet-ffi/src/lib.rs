@@ -146,6 +146,8 @@ pub trait EventListener: Send + Sync {
     fn on_clipboard_image(&self, mime: String, data: Vec<u8>);
     /// Ноутбук передал страницу («продолжить на телефоне»).
     fn on_handoff(&self, url: String, title: String);
+    /// Ноутбук просит включить/выключить беспроводную отладку. Ответить — `answer_screen_share`.
+    fn on_screen_share(&self, request_id: u64, enable: bool);
     /// Ноутбук просит разблокировать экран. Ответить — `answer_unlock(request_id, …)`.
     fn on_unlock_request(&self, request_id: u64, host: String);
 }
@@ -233,6 +235,7 @@ impl LinetClient {
                             }
                             Message::Handoff { url, title } => listener.on_handoff(url, title),
                             Message::UnlockRequest { host } => listener.on_unlock_request(env.id, host),
+                            Message::ScreenShare { enable } => listener.on_screen_share(env.id, enable),
                             other => tracing::debug!("сообщение: {other:?}"),
                         }
                         continue;
@@ -320,6 +323,13 @@ impl LinetClient {
         let connected = self.client.session().is_some();
         self.send_quietly(Message::Handoff { url, title });
         connected
+    }
+
+    pub fn answer_screen_share(&self, request_id: u64, ok: bool, error: String) {
+        let Some(session) = self.client.session() else { return };
+        self.rt.spawn(async move {
+            let _ = session.reply(request_id, Message::ScreenShareResult { ok, error }).await;
+        });
     }
 
     pub fn answer_unlock(&self, request_id: u64, approved: bool, reason: String) {

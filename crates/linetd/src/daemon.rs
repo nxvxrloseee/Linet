@@ -271,6 +271,24 @@ impl Daemon {
         Ok(())
     }
 
+    /// Попросить телефон включить/выключить беспроводную отладку. Возвращает его IP.
+    pub async fn screen_share(&self, enable: bool) -> Result<String> {
+        let session = self.session("")?;
+        let reply = session.request_slow(Message::ScreenShare { enable }, Duration::from_secs(10)).await?;
+        match reply {
+            Message::ScreenShareResult { ok: true, .. } => {}
+            Message::ScreenShareResult { ok: false, error } => bail!("{error}"),
+            other => bail!("неожиданный ответ: {other:?}"),
+        }
+        let ip = session.connection().remote_address().ip();
+        // Демон слушает dual-stack: IPv4 телефона приходит как ::ffff:a.b.c.d.
+        let ip = match ip {
+            std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(std::net::IpAddr::V4).unwrap_or(ip),
+            v4 => v4,
+        };
+        Ok(ip.to_string())
+    }
+
     pub async fn ping(&self, id: &str) -> Result<Duration> {
         self.session(id)?.ping().await
     }

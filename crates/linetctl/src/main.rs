@@ -7,6 +7,8 @@ use qrcode::render::unicode::Dense1x2;
 
 use linetctl::DaemonProxy;
 
+mod screen;
+
 #[derive(Parser)]
 #[command(version, about = "Управление Linet")]
 struct Args {
@@ -54,6 +56,18 @@ enum Cmd {
         #[arg(long)]
         notify: bool,
         files: Vec<std::path::PathBuf>,
+    },
+    /// Экран телефона на ноутбуке (scrcpy по Wi-Fi)
+    Screen {
+        /// Открыть отдельное приложение в своём окне (имя пакета)
+        #[arg(long)]
+        app: Option<String>,
+        /// Выбрать приложение из списка
+        #[arg(long)]
+        pick_app: bool,
+        /// Сообщать об ошибках уведомлением (запуск из меню)
+        #[arg(long)]
+        notify: bool,
     },
     /// Обновить приложение на телефоне (по умолчанию — свежий release-APK из android/)
     UpdatePhone {
@@ -109,6 +123,13 @@ async fn main() -> Result<()> {
             let result = send(&daemon, to, files, Kind::File, !gui).await;
             if gui {
                 desktop_notify(&result);
+            }
+            result?;
+        }
+        Cmd::Screen { app, pick_app, notify } => {
+            let result = screen::run(&daemon, app, pick_app).await;
+            if notify && let Err(e) = &result {
+                desktop_notify(&Err(anyhow::anyhow!("{e:#}")));
             }
             result?;
         }

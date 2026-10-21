@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Приложение с телефона
+GenericName=Linet
+Comment=Открыть приложение с телефона в отдельном окне
+Icon=phone
+Exec=@LINETCTL@ screen --pick-app --notify
+Terminal=false
+Categories=Utility;
+Keywords=linet;phone;scrcpy;app;телефон;приложение;
