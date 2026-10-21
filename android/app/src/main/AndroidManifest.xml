@@ -85,10 +85,6 @@
         </service>
 
         <receiver
-            android:name=".InstallReceiver"
-            android:exported="false" />
-
-        <receiver
             android:name=".UnlockReceiver"
             android:exported="false" />
 

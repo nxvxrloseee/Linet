@@ -1,6 +1,7 @@
 package org.linet
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -64,6 +65,20 @@ class MainActivity : ComponentActivity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
         }
         setContent { LinetTheme { Surface(Modifier.fillMaxSize()) { Screen() } } }
+        handleInstall(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleInstall(intent)
+    }
+
+    /** Нажали на уведомление «Обновление готово» — сразу открываем установщик. */
+    private fun handleInstall(intent: Intent?) {
+        if (intent?.getBooleanExtra(AppUpdate.EXTRA_INSTALL, false) == true) {
+            intent.removeExtra(AppUpdate.EXTRA_INSTALL)
+            AppUpdate.install(this)
+        }
     }
 }
 
@@ -93,6 +108,7 @@ private fun Screen() {
             is Status.Offline -> PeerCard(s.peer.name, connected = false, detail = s.reason)
             is Status.Connected -> PeerCard(s.peer.name, connected = true, detail = null)
         }
+        UpdateCard()
         if (status !is Status.NotPaired) NotificationsCard()
         if (status !is Status.NotPaired) UnlockCard()
         PowerCard()
@@ -234,6 +250,20 @@ private fun NotificationsCard() {
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun UpdateCard() {
+    val context = LocalContext.current
+    var pending by remember { mutableStateOf(AppUpdate.pending(context)) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { pending = AppUpdate.pending(context) }
+    if (!pending) return
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Есть обновление Linet", style = MaterialTheme.typography.titleMedium)
+            Button(onClick = { AppUpdate.install(context as android.app.Activity) }) { Text("Установить") }
         }
     }
 }

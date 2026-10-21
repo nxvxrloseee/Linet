@@ -2,4 +2,6 @@
 <!-- Картинки буфера обмена с ноутбука: отдаются другим приложениям через FileProvider. -->
 <paths>
     <cache-path name="clip" path="clip/" />
+    <!-- Обновление Linet: отдаётся системному установщику. -->
+    <cache-path name="update" path="update/" />
 </paths>
