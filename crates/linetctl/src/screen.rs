@@ -4,6 +4,7 @@
 //! Linet просит телефон включить её, находит порт через mDNS (`adb mdns services`),
 //! подключается, запускает scrcpy и после закрытия окна всё выключает.
 //! Сопряжение кодом не нужно, если ключ ноутбука уже разрешён по USB.
+//! Если телефон подключён проводом, используется USB — без всякой отладки по сети.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -14,34 +15,53 @@ use linetctl::DaemonProxy;
 const DISCOVER_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub async fn run(daemon: &DaemonProxy<'_>, app: Option<String>, pick_app: bool) -> Result<()> {
+    // Телефон на проводе — сразу по USB: быстрее и работает в любой сети,
+    // в том числе когда телефон раздаёт точку доступа.
+    if let Some(serial) = usb_device() {
+        return mirror(&serial, app, pick_app, false);
+    }
     let ip = daemon.screen_share(true).await.context("телефон не включил беспроводную отладку")?;
-    let result = mirror(&ip, app, pick_app);
+    let result = connect(&ip).and_then(|serial| mirror(&serial, app, pick_app, true));
     // Закрываем отладку в любом случае, даже если трансляция не удалась.
     let _ = daemon.screen_share(false).await;
     result
 }
 
-fn mirror(ip: &str, app: Option<String>, pick_app: bool) -> Result<()> {
-    let serial = connect(ip)?;
+/// Устройство, подключённое по USB (в `adb devices -l` у него есть `usb:`).
+fn usb_device() -> Option<String> {
+    let out = Command::new("adb").args(["devices", "-l"]).stderr(Stdio::null()).output().ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.contains(" device ") && l.contains(" usb:"))
+        .find_map(|l| l.split_whitespace().next().map(str::to_string))
+}
+
+/// `wireless` — подключение по Wi-Fi, его нужно закрыть после трансляции.
+fn mirror(serial: &str, app: Option<String>, pick_app: bool, wireless: bool) -> Result<()> {
+    let done = |serial: &str| {
+        if wireless {
+            disconnect(serial);
+        }
+    };
     let app = match (app, pick_app) {
         (Some(pkg), _) => Some(pkg),
-        (None, true) => match pick(&serial)? {
+        (None, true) => match pick(serial)? {
             Some(pkg) => Some(pkg),
             None => {
-                disconnect(&serial);
+                done(serial);
                 return Ok(());
             }
         },
         (None, false) => None,
     };
     let mut cmd = Command::new("scrcpy");
-    cmd.args(["-s", &serial, "--window-title=Телефон"]);
+    cmd.args(["-s", serial, "--window-title=Телефон"]);
     if let Some(pkg) = &app {
         // Приложение — в отдельном виртуальном экране, телефон при этом свободен.
         cmd.args(["--new-display", &format!("--start-app={pkg}")]);
     }
     let status = cmd.status().context("нужен scrcpy: sudo pacman -S scrcpy")?;
-    disconnect(&serial);
+    done(serial);
     if !status.success() {
         bail!("scrcpy завершился с ошибкой");
     }
