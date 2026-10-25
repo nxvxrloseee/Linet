@@ -18,6 +18,7 @@ pub trait Daemon {
     fn request_unlock(&self) -> zbus::Result<bool>;
     fn battery(&self, id: &str) -> zbus::Result<(i32, bool)>;
     fn screen_share(&self, enable: bool) -> zbus::Result<String>;
+    fn stats(&self) -> zbus::Result<Vec<(String, String)>>;
 
     #[zbus(signal)]
     fn transfer_progress(&self, id: u64, peer: String, name: String, incoming: bool, done: u64, total: u64)

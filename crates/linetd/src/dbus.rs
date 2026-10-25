@@ -85,6 +85,11 @@ impl Api {
         self.daemon.screen_share(enable).await.map_err(err)
     }
 
+    /// Счётчики демона: (ключ, значение). См. `linetctl stats`.
+    async fn stats(&self) -> Vec<(String, String)> {
+        self.daemon.stats()
+    }
+
     /// (заряд в процентах или -1, заряжается)
     async fn battery(&self, id: &str) -> fdo::Result<(i32, bool)> {
         let b = self.daemon.battery(id).map_err(err)?;

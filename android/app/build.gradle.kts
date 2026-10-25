@@ -5,6 +5,18 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Версия растёт сама: versionCode — число коммитов, versionName — версия из Cargo.toml
+// и этот номер (например, 0.1.1-57). Так каждое обновление отличимо от прошлого.
+val linetVersionCode: Int = providers.exec {
+    commandLine("git", "rev-list", "--count", "HEAD")
+    isIgnoreExitValue = true
+}.standardOutput.asText.get().trim().toIntOrNull()?.plus(100) ?: 1
+val linetVersionName: String = run {
+    val cargo = rootProject.file("../Cargo.toml").readText()
+    val base = Regex("""(?m)^version\s*=\s*"([^"]+)"""").find(cargo)?.groupValues?.get(1) ?: "0.0.0"
+    "$base-$linetVersionCode"
+}
+
 // Ключ подписи лежит вне репозитория: ~/.config/linet/signing.properties (+ .jks рядом).
 // Без него release подписывается debug-ключом, и обновить установленное приложение не выйдет.
 val signingProps = Properties().apply {
@@ -20,8 +32,8 @@ android {
         applicationId = "org.linet"
         minSdk = 29
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = linetVersionCode
+        versionName = linetVersionName
         ndk { abiFilters += listOf("arm64-v8a") }
     }
 

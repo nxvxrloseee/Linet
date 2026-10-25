@@ -17,6 +17,7 @@ use tokio::sync::watch;
 use crate::clipboard::Clipboard;
 use crate::mirror::Mirror;
 use crate::notify::{Handler, Notice, NoticeEvent, Notifier};
+use crate::stats::Stats;
 use crate::tray::Tray;
 use crate::vnc::Vnc;
 
@@ -56,6 +57,7 @@ pub struct Daemon {
     notifier: OnceLock<Notifier>,
     clipboard: Option<Arc<Clipboard>>,
     tray: OnceLock<Tray>,
+    stats: Stats,
     vnc: OnceLock<Arc<Vnc>>,
     battery: Mutex<HashMap<Fingerprint, BatteryState>>,
     /// Счётчик изменений списка устройств — для D-Bus-сигнала.
@@ -90,6 +92,7 @@ impl Daemon {
             notifier: OnceLock::new(),
             clipboard,
             tray: OnceLock::new(),
+            stats: Stats::new(),
             vnc: OnceLock::new(),
             battery: Mutex::new(HashMap::new()),
             changed: watch::channel(0).0,
@@ -119,6 +122,7 @@ impl Daemon {
         let fp = session.peer();
         let warn = {
             let mut map = self.battery.lock().unwrap();
+            self.stats.battery(level, charging);
             let b = map.entry(fp).or_insert(BatteryState { level, charging, warned_at: None });
             b.level = level;
             b.charging = charging;
@@ -191,6 +195,14 @@ impl Daemon {
 
     pub fn session_of(&self, fp: &Fingerprint) -> Option<Arc<Session>> {
         self.sessions.lock().unwrap().get(fp).cloned()
+    }
+
+    /// Счётчики для `linetctl stats`.
+    pub fn stats(&self) -> Vec<(String, String)> {
+        let open: Vec<quinn::Connection> =
+            self.sessions.lock().unwrap().values().map(|s| s.connection().clone()).collect();
+        let battery = self.battery.lock().unwrap().values().next().map(|b| (b.level, b.charging));
+        self.stats.report(&open, battery)
     }
 
     pub fn connected(&self) -> bool {
@@ -515,6 +527,7 @@ impl Daemon {
             old.close("replaced");
         }
         tracing::info!(name = %session.hello().name, %remote, "подключено");
+        self.stats.connected();
         self.notify_changed();
         if let Some(tray) = self.tray.get() {
             let name = session.hello().name.clone();
@@ -562,6 +575,7 @@ impl Daemon {
             }
         }
 
+        self.stats.disconnected(session.connection());
         let gone = {
             let mut sessions = self.sessions.lock().unwrap();
             let ours = sessions.get(&fp).is_some_and(|s| Arc::ptr_eq(s, &session));

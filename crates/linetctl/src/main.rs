@@ -77,6 +77,12 @@ enum Cmd {
     },
     /// Состояние одной строкой JSON (для waybar)
     Status,
+    /// Счётчики: подключения, трафик, память демона, разряд телефона
+    Stats {
+        /// Вывести JSON (для скриптов)
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -154,6 +160,32 @@ async fn main() -> Result<()> {
         Cmd::Open { url, title, to } => {
             daemon.send_url(&to, &url, &title).await?;
             println!("Открыто на телефоне");
+        }
+        Cmd::Stats { json } => {
+            let stats: std::collections::BTreeMap<String, String> = daemon.stats().await?.into_iter().collect();
+            if json {
+                println!("{}", serde_json::to_string(&stats)?);
+                return Ok(());
+            }
+            let num = |k: &str| stats.get(k).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            let up = num("uptime_s");
+            println!("Демон работает     {}ч {}м", up / 3600, up / 60 % 60);
+            println!("Подключений        {} (обрывов {})", num("connects"), num("disconnects"));
+            println!("Трафик             ↑ {}  ↓ {}", human(num("tx_bytes")), human(num("rx_bytes")));
+            println!(
+                "Память демона      {} (пик {}), потоков {}",
+                human(num("rss_kb") * 1024),
+                human(num("rss_peak_kb") * 1024),
+                num("threads")
+            );
+            if let Some(level) = stats.get("phone_battery") {
+                let charging = stats.get("phone_charging").is_some_and(|c| c == "true");
+                println!("Батарея телефона   {level}%{}", if charging { ", заряжается" } else { "" });
+            }
+            match stats.get("phone_drain_per_hour") {
+                Some(rate) => println!("Разряд телефона    {rate} %/ч (последние часы без зарядки)"),
+                None => println!("Разряд телефона    пока мало данных (нужно ≥30 мин без зарядки)"),
+            }
         }
         Cmd::Status => {
             let devices = daemon.devices().await?;

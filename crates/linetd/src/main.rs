@@ -5,6 +5,7 @@ mod dbus;
 mod idle;
 mod mirror;
 mod netwatch;
+mod stats;
 mod notify;
 mod tray;
 mod unlock;
