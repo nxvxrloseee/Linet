@@ -1,9 +1,39 @@
+# Rust build output (Cargo.lock stays tracked)
 /target
+
+# Android build output and generated bindings
 /android/.gradle
+/android/.kotlin
 /android/build
 /android/app/build
 /android/local.properties
 /android/app/src/main/jniLibs
 /android/app/src/main/java/uniffi
+
+# Local simulator data and signed browser extension
 /.sim
 /dist/firefox
+
+# Local credentials and signing keys
+.env
+.env.*
+!.env.example
+!.env.sample
+*.jks
+*.keystore
+signing.properties
+/.aws/
+
+# Local agent and IDE settings
+/.agents/
+/.codex/
+.idea/
+.vscode/
+*.iml
+
+# Editor and OS temporary files
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
