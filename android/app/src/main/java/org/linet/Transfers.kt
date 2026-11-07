@@ -52,11 +52,15 @@ object Transfers {
                 finish(context, t)
                 if (t.incoming && t.purpose == "app-update" && s.path != null) {
                     nm.cancel(notificationId(t))
-                    AppUpdate.received(context, File(s.path!!))
+                    AppUpdate.received(context, File(s.path))
                     return
                 }
-                val saved = s.path?.let { saveToDownloads(context, File(it), t.name) }
-                nm.notify(notificationId(t), doneNotification(context, t, saved))
+                val path = s.path
+                if (path != null) {
+                    saveReceived(context, t, File(path))
+                } else {
+                    nm.notify(notificationId(t), doneNotification(context, t, null))
+                }
             }
             is TransferStatus.Failed -> {
                 finish(context, t)
@@ -83,8 +87,8 @@ object Transfers {
         }
     }
 
-    /** Переносит файл из кэша приложения в общие «Загрузки/Linet». */
-    private fun saveToDownloads(context: Context, file: File, name: String): Uri? {
+    /** Переносит файл из приватного каталога приложения в общие «Загрузки/Linet». */
+    internal fun saveToDownloads(context: Context, file: File, name: String): Uri {
         val mime = mimeOf(name)
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, name)
@@ -93,16 +97,75 @@ object Transfers {
             put(MediaStore.Downloads.IS_PENDING, 1)
         }
         val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: error("Не удалось создать файл в Загрузках")
         try {
-            resolver.openOutputStream(uri)!!.use { out -> file.inputStream().use { it.copyTo(out) } }
-            resolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
-            return uri
+            val output = resolver.openOutputStream(uri) ?: error("Не удалось открыть файл в Загрузках")
+            output.use { out -> file.inputStream().use { it.copyTo(out) } }
+            check(resolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null) == 1) {
+                "Не удалось завершить сохранение в Загрузки"
+            }
         } catch (e: Exception) {
-            resolver.delete(uri, null, null)
+            runCatching { resolver.delete(uri, null, null) }.onFailure { e.addSuppressed(it) }
             throw e
-        } finally {
-            file.delete()
+        }
+        // Удаляем исходник только после успешного копирования и публикации.
+        if (!file.delete()) Log.w(TAG, "Не удалось удалить сохранённый исходник ${file.name}")
+        return uri
+    }
+
+    private fun saveReceived(context: Context, t: TransferInfo, file: File) {
+        val nm = context.getSystemService(NotificationManager::class.java)
+        try {
+            val saved = saveToDownloads(context, file, t.name)
+            nm.notify(notificationId(t), doneNotification(context, t, saved))
+        } catch (e: Exception) {
+            Log.e(TAG, "save ${t.name}", e)
+            val retry = Intent(context, LinetService::class.java)
+                .setAction(LinetService.ACTION_RETRY_SAVE)
+                .setData(Uri.parse("linet://retry-save/${t.id}"))
+                .putExtra("id", t.id.toLong())
+                .putExtra("path", file.path)
+                .putExtra("name", t.name)
+                .putExtra("peer", t.peer)
+            val pi = PendingIntent.getForegroundService(
+                context, notificationId(t), retry, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            nm.notify(notificationId(t), base(context, "Не удалось сохранить: ${t.name}")
+                .setContentText("Файл сохранён в Linet. Освободи место и нажми «Повторить».")
+                .addAction(Notification.Action.Builder(null, "Повторить", pi).build())
+                .build())
+        }
+    }
+
+    /** Повторное сохранение не требует повторной передачи с ноутбука. */
+    fun retrySave(context: Context, intent: Intent, finished: () -> Unit) {
+        val app = context.applicationContext
+        worker.execute {
+            try {
+                val path = intent.getStringExtra("path") ?: return@execute
+                val file = File(path).canonicalFile
+                val roots = listOf(File(app.filesDir, "incoming"), File(app.cacheDir, "incoming"))
+                require(roots.any { it.canonicalFile == file.parentFile }) { "Недопустимый путь файла" }
+                // Повторный клик мог попасть в очередь до завершения первого сохранения.
+                if (!file.isFile) return@execute
+                val name = intent.getStringExtra("name") ?: file.name
+                val t = TransferInfo(
+                    intent.getLongExtra("id", 0).toULong(), intent.getStringExtra("peer").orEmpty(),
+                    name, true, file.length().toULong(), file.length().toULong(), null, TransferStatus.Done(path),
+                )
+                ensureChannel(app.getSystemService(NotificationManager::class.java))
+                if (active.add(t.id)) setAwake(app, true)
+                try {
+                    saveReceived(app, t, file)
+                } finally {
+                    finish(app, t)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "retry save", e)
+            } finally {
+                finished()
+            }
         }
     }
 

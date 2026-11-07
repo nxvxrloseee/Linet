@@ -91,7 +91,8 @@ class LinetService : Service() {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
         )
         if (Linet.client(this).paired() == null) {
-            stopSelf()
+            // Решение об остановке — в onStartCommand: можно повторить сохранение
+            // уже принятого файла даже после удаления сопряжения.
             return
         }
 
@@ -127,6 +128,21 @@ class LinetService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_RETRY_SAVE) {
+            ServiceCompat.startForeground(
+                this, NOTIFICATION_ID, notification(Linet.status.value),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+            )
+            // Копирование большого файла не ограничено временем BroadcastReceiver.
+            Transfers.retrySave(this, intent) {
+                if (Linet.client(this).paired() == null) stopSelf(startId)
+            }
+            return if (Linet.client(this).paired() == null) START_NOT_STICKY else START_STICKY
+        }
+        if (Linet.client(this).paired() == null) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_SEND_FILES) {
             // Каждый startForegroundService требует startForeground, даже если сервис уже запущен.
             ServiceCompat.startForeground(
@@ -198,6 +214,7 @@ class LinetService : Service() {
     companion object {
         private const val TAG = "LinetService"
         private const val ACTION_SEND_FILES = "org.linet.SEND_FILES"
+        const val ACTION_RETRY_SAVE = "org.linet.RETRY_SAVE"
         private const val CONNECT_WAIT_MS = 15_000L
         private const val CHANNEL_ID = "connection"
         private const val NOTIFICATION_ID = 1

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use linet_core::client::CLOSE_UNPAIRED;
-use linet_core::files::{SEND_ATTEMPTS, Transfers};
+use linet_core::files::{SEND_ATTEMPTS, TransferState, TransferUpdate, Transfers};
 use linet_core::pairing::{self, Invite};
 use linet_core::store::now_unix;
 use linet_core::tls::{self, ClientPolicy};
@@ -349,30 +349,33 @@ impl Daemon {
         let transfer = self.transfers.new_id();
         let this = self.clone();
         tokio::spawn(async move {
-            let mut session = session;
-            for attempt in 1..=SEND_ATTEMPTS {
-                let last = attempt == SEND_ATTEMPTS;
-                let reader = match file.try_clone() {
-                    Ok(f) => tokio::fs::File::from_std(f),
-                    Err(e) => return tracing::warn!(%name, "отправка: {e}"),
-                };
-                let res = this
-                    .transfers
-                    .send(&session, transfer, reader, &name, meta.len(), &mime, purpose.as_deref(), last)
-                    .await;
-                match res {
-                    Ok(()) => return,
-                    Err(e) if last || session.connection().close_reason().is_none() => {
-                        return tracing::warn!(%name, "отправка: {e:#}");
-                    }
-                    Err(e) => {
-                        tracing::info!(%name, attempt, "связь оборвалась, докачаю после переподключения: {e:#}");
-                        match this.wait_new_session(&session, RESUME_WAIT).await {
-                            Some(s) => session = s,
-                            None => return tracing::warn!(%name, "телефон не вернулся, отправка прервана"),
+            let update = TransferUpdate {
+                id: transfer, peer: session.hello().name.clone(), name: name.clone(), incoming: false,
+                done: 0, total: meta.len(), purpose: purpose.clone(), state: TransferState::Progress,
+            };
+            let result = async {
+                let mut session = session;
+                for attempt in 1..=SEND_ATTEMPTS {
+                    let last = attempt == SEND_ATTEMPTS;
+                    let reader = tokio::fs::File::from_std(file.try_clone()?);
+                    let res = this.transfers
+                        .send(&session, transfer, reader, &name, meta.len(), &mime, purpose.as_deref())
+                        .await;
+                    match res {
+                        Ok(()) => return Ok(()),
+                        Err(e) if last || session.connection().close_reason().is_none() => return Err(e),
+                        Err(e) => {
+                            tracing::info!(%name, attempt, "связь оборвалась, докачаю после переподключения: {e:#}");
+                            session = this.wait_new_session(&session, RESUME_WAIT).await
+                                .context("телефон не вернулся, отправка прервана")?;
                         }
                     }
                 }
+                unreachable!("последняя попытка всегда возвращает результат")
+            }.await;
+            if let Err(error) = result {
+                this.transfers.fail_outgoing(update, &error);
+                tracing::warn!(%name, "отправка: {error:#}");
             }
         });
         Ok(transfer)

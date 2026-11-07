@@ -93,6 +93,12 @@
             android:name=".UnlockReceiver"
             android:exported="false" />
 
+        <activity
+            android:name=".UnlockActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <receiver
             android:name=".BootReceiver"
             android:exported="true">

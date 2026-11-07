@@ -1,6 +1,7 @@
 package org.linet
 
 import android.app.KeyguardManager
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -10,6 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.Icon
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -54,9 +56,15 @@ object Unlock {
     }
 
     fun resolve(context: Context, id: ULong, approved: Boolean, reason: String) {
-        if (!pending.remove(id)) return
+        val allowed = takeApproval(context, id, approved) ?: return
         context.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
-        answer(context, id, approved, reason)
+        answer(context, id, allowed, if (approved && !allowed) "телефон заблокирован" else reason)
+    }
+
+    /** Одноразовое решение с проверкой блокировки в момент подтверждения. */
+    internal fun takeApproval(context: Context, id: ULong, approved: Boolean): Boolean? {
+        if (!pending.remove(id)) return null
+        return approved && !context.getSystemService(KeyguardManager::class.java).isDeviceLocked
     }
 
     private fun answer(context: Context, id: ULong, approved: Boolean, reason: String) =
@@ -76,12 +84,17 @@ object Unlock {
         val nm = context.getSystemService(NotificationManager::class.java)
         channels(nm)
         fun action(approve: Boolean, title: String): Notification.Action {
-            val intent = Intent(context, UnlockReceiver::class.java)
+            val needsActivity = approve && Build.VERSION.SDK_INT < 31
+            val target = if (needsActivity) UnlockActivity::class.java else UnlockReceiver::class.java
+            val intent = Intent(context, target)
                 .putExtra(EXTRA_ID, id.toLong())
                 .putExtra(EXTRA_APPROVE, approve)
-            val pi = PendingIntent.getBroadcast(
-                context, if (approve) 1 else 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-            )
+            val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            val pi = if (needsActivity) {
+                PendingIntent.getActivity(context, 1, intent, flags)
+            } else {
+                PendingIntent.getBroadcast(context, if (approve) 1 else 0, intent, flags)
+            }
             val builder = Notification.Action.Builder(Icon.createWithResource(context, R.drawable.ic_linet), title, pi)
             // Кнопка «Разблокировать» на экране блокировки телефона требует его разблокировки.
             if (approve && Build.VERSION.SDK_INT >= 31) builder.setAuthenticationRequired(true)
@@ -109,6 +122,31 @@ object Unlock {
             .setTimeoutAfter(5_000)
             .build()
         nm.notify(NOTIFICATION_ID, notification)
+    }
+}
+
+/** Android 10–11: сначала системный PIN/отпечаток, затем согласие ноутбуку. */
+class UnlockActivity : Activity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setShowWhenLocked(true)
+        val id = intent.getLongExtra(Unlock.EXTRA_ID, -1).toULong()
+        val keyguard = getSystemService(KeyguardManager::class.java)
+        if (!keyguard.isDeviceLocked) {
+            Unlock.resolve(this, id, true, "подтверждено на телефоне")
+            finish()
+            return
+        }
+        keyguard.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
+            override fun onDismissSucceeded() = complete(true)
+            override fun onDismissCancelled() = complete(false)
+            override fun onDismissError() = complete(false)
+
+            private fun complete(approved: Boolean) {
+                Unlock.resolve(this@UnlockActivity, id, approved, if (approved) "подтверждено на телефоне" else "разблокировка отменена")
+                finish()
+            }
+        })
     }
 }
 

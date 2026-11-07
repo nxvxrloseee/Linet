@@ -2,11 +2,12 @@
 //!
 //! Отправитель: `FileOffer` → ждёт `FileAccept { offset }` → перематывает файл на
 //! `offset` → однонаправленный поток `u64 id ‖ данные` → `finish` и ожидание
-//! подтверждения доставки.
+//! подтверждения проверки и сохранения (`FileResult`) у нового получателя.
 //! Получатель от сопряжённых устройств принимает автоматически и пишет во
-//! временный `.part`, имя которого выводится из (отправитель, имя, размер). Если
+//! временный `.part`, имя которого выводится из (отправитель, имя, размер, SHA-256). Если
 //! передача оборвалась, `.part` остаётся, и повторная отправка того же файла
-//! продолжается с места обрыва. Целостность обеспечивает AEAD в QUIC.
+//! продолжается с места обрыва. SHA-256 проверяется перед сохранением; старые
+//! отправители передают без докачки.
 
 use std::collections::HashMap;
 use std::io::SeekFrom;
@@ -18,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result, bail};
 use quinn::RecvStream;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::oneshot;
 
 use crate::identity::Fingerprint;
 use crate::proto::{Envelope, Message};
@@ -28,6 +30,7 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 /// Сколько ждать поток после принятого предложения.
 const OFFER_TTL: Duration = Duration::from_secs(60);
 const MAX_PENDING: usize = 64;
+const RESULT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Недокачанные файлы старше этого удаляются.
 const PART_TTL: Duration = Duration::from_secs(48 * 3600);
 /// Лимит размера по умолчанию.
@@ -56,6 +59,7 @@ pub struct TransferUpdate {
 
 pub type ProgressFn = Arc<dyn Fn(TransferUpdate) + Send + Sync>;
 
+#[derive(Clone)]
 struct Offer {
     name: String,
     size: u64,
@@ -64,12 +68,19 @@ struct Offer {
     offset: u64,
     purpose: Option<String>,
     accepted: Instant,
+    sha256: Option<String>,
+    active: bool,
+    connection: quinn::Connection,
 }
+
+type TransferKey = (usize, u64);
+type ResultWaiters = HashMap<TransferKey, oneshot::Sender<Option<String>>>;
 
 pub struct Transfers {
     inbox: PathBuf,
     max_size: u64,
-    pending: Mutex<HashMap<u64, Offer>>,
+    pending: Mutex<HashMap<TransferKey, Offer>>,
+    results: Mutex<ResultWaiters>,
     next_id: AtomicU64,
     progress: ProgressFn,
 }
@@ -82,6 +93,7 @@ impl Transfers {
             inbox,
             max_size,
             pending: Mutex::new(HashMap::new()),
+            results: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(seed),
             progress,
         })
@@ -96,16 +108,23 @@ impl Transfers {
         match inbound {
             crate::Inbound::Stream(stream) => {
                 let this = self.clone();
+                let session = session.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = this.receive(stream).await {
+                    if let Err(e) = this.receive(&session, stream).await {
                         tracing::warn!("приём файла: {e:#}");
                     }
                 });
                 None
             }
             crate::Inbound::Message(env) => match env.body {
-                Message::FileOffer { id, name, size, mime: _, purpose } => {
-                    let reply = self.accept_offer(id, name, size, purpose, session);
+                Message::FileResult { id, error } => {
+                    if let Some(waiter) = self.results.lock().unwrap().remove(&(session.connection().stable_id(), id)) {
+                        let _ = waiter.send(error);
+                    }
+                    None
+                }
+                Message::FileOffer { id, name, size, mime: _, purpose, sha256 } => {
+                    let reply = self.accept_offer(id, name, size, purpose, sha256, session);
                     let session = session.clone();
                     tokio::spawn(async move {
                         if let Err(e) = session.reply(env.id, reply).await {
@@ -119,28 +138,37 @@ impl Transfers {
         }
     }
 
-    fn accept_offer(&self, id: u64, name: String, size: u64, purpose: Option<String>, session: &Session) -> Message {
+    #[allow(clippy::too_many_arguments)]
+    fn accept_offer(&self, id: u64, name: String, size: u64, purpose: Option<String>, sha256: Option<String>, session: &Session) -> Message {
         let peer = session.hello().name.clone();
         if size > self.max_size {
             tracing::warn!(%peer, %name, size, "файл больше лимита");
             return Message::FileReject { id, reason: format!("файл больше {} МБ", self.max_size >> 20) };
         }
+        if sha256.as_ref().is_some_and(|h| h.len() != 64 || !h.bytes().all(|b| b.is_ascii_hexdigit())) {
+            return Message::FileReject { id, reason: "неверный SHA-256".into() };
+        }
+        let sha256 = sha256.map(|h| h.to_ascii_lowercase());
+        let key = (session.connection().stable_id(), id);
         let mut pending = self.pending.lock().unwrap();
+        pending.retain(|_, o| o.active || (o.accepted.elapsed() < OFFER_TTL && o.connection.close_reason().is_none()));
+        if pending.contains_key(&key) {
+            return Message::FileReject { id, reason: "id передачи уже занят".into() };
+        }
         if pending.len() >= MAX_PENDING {
             return Message::FileReject { id, reason: "слишком много передач сразу".into() };
         }
-        pending.retain(|_, o| o.accepted.elapsed() < OFFER_TTL);
-        prune_parts(&self.inbox);
+        prune_parts(&self.inbox, pending.values().map(|o| o.part.as_path()));
 
         let name = sanitize(&name);
-        let part = self.inbox.join(part_name(&session.peer(), &name, size));
+        let part = self.inbox.join(part_name(&session.peer(), &name, size, sha256.as_deref()));
         // Тот же файл уже ждёт своего потока — второй раз не берём (и не трогаем его .part).
         if pending.values().any(|o| o.part == part) {
             return Message::FileReject { id, reason: "этот файл уже принимается".into() };
         }
         // Начало этого же файла уже есть — продолжаем с места обрыва.
         let offset = match std::fs::metadata(&part) {
-            Ok(m) if m.len() < size => m.len(),
+            Ok(m) if sha256.is_some() && m.len() <= size => m.len(),
             Ok(_) => {
                 let _ = std::fs::remove_file(&part);
                 0
@@ -148,15 +176,28 @@ impl Transfers {
             Err(_) => 0,
         };
         tracing::info!(%peer, %name, size, offset, "входящий файл");
-        pending.insert(id, Offer { name, size, peer, part, offset, purpose, accepted: Instant::now() });
-        Message::FileAccept { id, offset }
+        pending.insert(key, Offer {
+            name, size, peer, part, offset, purpose, accepted: Instant::now(),
+            sha256: sha256.clone(), active: false, connection: session.connection().clone(),
+        });
+        Message::FileAccept { id, offset, sha256 }
     }
 
-    async fn receive(&self, mut stream: RecvStream) -> Result<()> {
+    async fn receive(&self, session: &Session, mut stream: RecvStream) -> Result<()> {
         let mut header = [0u8; 8];
         stream.read_exact(&mut header).await?;
         let id = u64::from_be_bytes(header);
-        let offer = self.pending.lock().unwrap().remove(&id).context("поток без принятого предложения")?;
+        let key = (session.connection().stable_id(), id);
+        let offer = {
+            let mut pending = self.pending.lock().unwrap();
+            let offer = pending.get_mut(&key).context("поток без принятого предложения")?;
+            if offer.active || offer.accepted.elapsed() >= OFFER_TTL {
+                bail!("поток повторный или предложение просрочено");
+            }
+            offer.active = true;
+            offer.clone()
+        };
+        let reservation = IncomingReservation { transfers: self, key };
 
         let mut update = TransferUpdate {
             id,
@@ -170,12 +211,15 @@ impl Transfers {
         };
         (self.progress)(update.clone());
 
-        tokio::fs::create_dir_all(&self.inbox).await?;
-        let result = self.receive_into(&mut stream, &offer, &mut update).await;
+        let result = async {
+            tokio::fs::create_dir_all(&self.inbox).await?;
+            self.receive_into(&mut stream, &offer, &mut update).await
+        }.await;
         let keep_part = match &result {
             // Оборвалось посреди — оставляем начало для докачки.
             Err(_) => update.done > 0 && update.done < update.total,
-            Ok(()) => false,
+            // Полностью проверенный файл не удаляем, если не удалось подобрать имя/сохранить.
+            Ok(()) => true,
         };
         update.state = match result {
             Ok(()) => match persist(&offer.part, &self.inbox, &offer.name) {
@@ -191,13 +235,25 @@ impl Transfers {
             let _ = tokio::fs::remove_file(&offer.part).await;
         }
         tracing::info!(name = %update.name, state = ?update.state, keep_part, "приём завершён");
+        let error = match &update.state {
+            TransferState::Failed(error) => Some(error.clone()),
+            _ => None,
+        };
+        // Освобождаем путь до подтверждения: следующая передача уже может начаться.
+        drop(reservation);
         (self.progress)(update);
+        if offer.sha256.is_some() {
+            session.send(Message::FileResult { id, error }).await?;
+        }
         Ok(())
     }
 
     async fn receive_into(&self, stream: &mut RecvStream, offer: &Offer, update: &mut TransferUpdate) -> Result<()> {
-        let mut file = tokio::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&offer.part).await?;
+        let mut file = tokio::fs::OpenOptions::new().create(true).read(true).write(true).truncate(false).open(&offer.part).await?;
         file.set_len(offer.offset).await?;
+        let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
+        // Учитываем в хеше и уже сохранённый префикс.
+        hash_into(&mut (&mut file).take(offer.offset), &mut hash).await?;
         file.seek(SeekFrom::Start(offer.offset)).await?;
         let mut last = Instant::now();
         while let Some(chunk) = stream.read_chunk(CHUNK, true).await? {
@@ -206,6 +262,7 @@ impl Transfers {
                 bail!("пришло больше заявленного размера");
             }
             file.write_all(&chunk.bytes).await?;
+            hash.update(&chunk.bytes);
             if last.elapsed() >= PROGRESS_EVERY {
                 last = Instant::now();
                 (self.progress)(update.clone());
@@ -216,6 +273,12 @@ impl Transfers {
             bail!("получено {} из {} байт", update.done, update.total);
         }
         file.sync_all().await?;
+        if let Some(expected) = &offer.sha256 {
+            let actual = hex::encode(hash.finish());
+            if &actual != expected {
+                bail!("SHA-256 не совпал: файл изменился или повреждён");
+            }
+        }
         Ok(())
     }
 
@@ -225,7 +288,7 @@ impl Transfers {
 
     /// Отправляет файл и ждёт, пока получатель подтвердит доставку всех данных.
     /// `id` берётся из [`Transfers::new_id`], чтобы вызывающий знал его заранее.
-    /// `last_attempt == false` — при ошибке не сообщать о провале: вызывающий повторит.
+    /// Конечную ошибку после повторов сообщает вызывающий через `fail_outgoing`.
     #[allow(clippy::too_many_arguments)]
     pub async fn send(
         &self,
@@ -236,7 +299,6 @@ impl Transfers {
         size: u64,
         mime: &str,
         purpose: Option<&str>,
-        last_attempt: bool,
     ) -> Result<()> {
         let mut update = TransferUpdate {
             id,
@@ -250,16 +312,31 @@ impl Transfers {
         };
         (self.progress)(update.clone());
 
+        let key = (session.connection().stable_id(), id);
+        let (result_tx, result_rx) = oneshot::channel();
+        self.results.lock().unwrap().insert(key, result_tx);
+        let _reservation = OutgoingReservation { transfers: self, key };
         let result = async {
+            reader.seek(SeekFrom::Start(0)).await?;
+            let (sha256, actual_size) = hash_reader(&mut reader).await?;
+            if actual_size != size {
+                bail!("файл изменился: {actual_size} вместо {size} байт");
+            }
             let offer = Message::FileOffer {
                 id,
                 name: name.into(),
                 size,
                 mime: mime.into(),
+                sha256: Some(sha256.clone()),
                 purpose: purpose.map(Into::into),
             };
-            let offset = match session.request(offer).await? {
-                Message::FileAccept { id: a, offset } if a == id => offset,
+            let (offset, verified) = match session.request(offer).await? {
+                Message::FileAccept { id: a, offset, sha256: accepted_hash } if a == id => {
+                    if offset > 0 && accepted_hash.as_deref() != Some(sha256.as_str()) {
+                        bail!("получатель не поддерживает безопасную докачку; обнови Linet на получателе");
+                    }
+                    (offset, accepted_hash.as_deref() == Some(sha256.as_str()))
+                },
                 Message::FileReject { reason, .. } => bail!("получатель отказался: {reason}"),
                 other => bail!("неожиданный ответ: {other:?}"),
             };
@@ -291,23 +368,74 @@ impl Transfers {
             if let Some(code) = stream.stopped().await? {
                 bail!("получатель прервал приём (код {code})");
             }
+            if verified {
+                let result = tokio::select! {
+                    result = tokio::time::timeout(RESULT_TIMEOUT, result_rx) => result,
+                    _ = session.closed() => bail!("сеанс закрыт до подтверждения сохранения"),
+                };
+                match result {
+                    Ok(Ok(None)) => {},
+                    Ok(Ok(Some(error))) => bail!("получатель не сохранил файл: {error}"),
+                    Ok(Err(_)) => bail!("сеанс закрыт до подтверждения сохранения"),
+                    Err(_) => bail!("нет подтверждения сохранения файла"),
+                }
+            }
             anyhow::Ok(())
         }
         .await;
 
-        match &result {
-            Ok(()) => {
-                update.state = TransferState::Done { path: None };
-                (self.progress)(update);
-            }
-            Err(e) if last_attempt => {
-                update.state = TransferState::Failed(format!("{e:#}"));
-                (self.progress)(update);
-            }
-            Err(_) => {}
+        if result.is_ok() {
+            update.state = TransferState::Done { path: None };
+            (self.progress)(update);
         }
         result
     }
+
+    pub fn fail_outgoing(&self, mut update: TransferUpdate, error: &anyhow::Error) {
+        update.state = TransferState::Failed(format!("{error:#}"));
+        (self.progress)(update);
+    }
+}
+
+/// Резерв остаётся до завершения записи и освобождается также при отмене задачи.
+struct IncomingReservation<'a> {
+    transfers: &'a Transfers,
+    key: TransferKey,
+}
+
+impl Drop for IncomingReservation<'_> {
+    fn drop(&mut self) {
+        self.transfers.pending.lock().unwrap().remove(&self.key);
+    }
+}
+
+struct OutgoingReservation<'a> {
+    transfers: &'a Transfers,
+    key: TransferKey,
+}
+
+impl Drop for OutgoingReservation<'_> {
+    fn drop(&mut self) {
+        self.transfers.results.lock().unwrap().remove(&self.key);
+    }
+}
+
+async fn hash_reader(reader: &mut (impl AsyncRead + Unpin)) -> Result<(String, u64)> {
+    let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
+    let size = hash_into(reader, &mut hash).await?;
+    Ok((hex::encode(hash.finish()), size))
+}
+
+async fn hash_into(reader: &mut (impl AsyncRead + Unpin), hash: &mut ring::digest::Context) -> Result<u64> {
+    let mut buffer = vec![0; CHUNK];
+    let mut size = 0;
+    loop {
+        let n = reader.read(&mut buffer).await?;
+        if n == 0 { break; }
+        hash.update(&buffer[..n]);
+        size += n as u64;
+    }
+    Ok(size)
 }
 
 /// Сколько раз пробовать отправку, если связь рвётся посреди передачи.
@@ -315,18 +443,21 @@ pub const SEND_ATTEMPTS: usize = 3;
 
 /// Имя временного файла: одинаковое для повторной отправки того же файла
 /// тем же устройством — так и находится, что докачивать.
-fn part_name(peer: &Fingerprint, name: &str, size: u64) -> String {
+fn part_name(peer: &Fingerprint, name: &str, size: u64, sha256: Option<&str>) -> String {
     let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
     ctx.update(&peer.0);
     ctx.update(name.as_bytes());
     ctx.update(&size.to_be_bytes());
+    if let Some(hash) = sha256 { ctx.update(hash.as_bytes()); }
     format!(".linet-{}.part", hex::encode(&ctx.finish().as_ref()[..12]))
 }
 
 /// Удаляет брошенные недокачанные файлы.
-fn prune_parts(dir: &Path) {
+fn prune_parts<'a>(dir: &Path, reserved: impl Iterator<Item = &'a Path>) {
+    let reserved: std::collections::HashSet<_> = reserved.collect();
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
+        if reserved.contains(e.path().as_path()) { continue; }
         let name = e.file_name();
         let name = name.to_string_lossy();
         if !(name.starts_with(".linet-") && name.ends_with(".part")) {
@@ -400,10 +531,10 @@ mod tests {
     #[test]
     fn part_name_is_stable_and_distinct() {
         let (a, b) = (Fingerprint([1; 32]), Fingerprint([2; 32]));
-        assert_eq!(part_name(&a, "x.bin", 10), part_name(&a, "x.bin", 10));
-        assert_ne!(part_name(&a, "x.bin", 10), part_name(&b, "x.bin", 10));
-        assert_ne!(part_name(&a, "x.bin", 10), part_name(&a, "x.bin", 11));
-        assert!(part_name(&a, "x.bin", 10).starts_with(".linet-"));
+        assert_eq!(part_name(&a, "x.bin", 10, None), part_name(&a, "x.bin", 10, None));
+        assert_ne!(part_name(&a, "x.bin", 10, None), part_name(&b, "x.bin", 10, None));
+        assert_ne!(part_name(&a, "x.bin", 10, None), part_name(&a, "x.bin", 11, None));
+        assert!(part_name(&a, "x.bin", 10, None).starts_with(".linet-"));
     }
 
     #[test]
@@ -422,3 +553,7 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "files_regression.rs"]
+mod regression;

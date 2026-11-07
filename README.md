@@ -83,5 +83,13 @@ Chromium: `chrome://extensions` → режим разработчика → «З
 ## Проверка
 
 ```sh
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+(cd android && JAVA_HOME=/usr/lib/jvm/java-17-openjdk ./gradlew testDebugUnitTest)
+```
+
+Полная сквозная проверка (нужны окружение Hyprland и wayvnc):
+
+```sh
 scripts/e2e.sh     # сквозная проверка без телефона, перед каждым обновлением
 ```

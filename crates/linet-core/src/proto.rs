@@ -88,6 +88,9 @@ pub enum Message {
         name: String,
         size: u64,
         mime: String,
+        /// SHA-256 содержимого; без него докачка отключена.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
         /// Назначение: `None` — обычный файл, `"app-update"` — обновление приложения.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         purpose: Option<String>,
@@ -97,6 +100,9 @@ pub enum Message {
         id: u64,
         #[serde(default)]
         offset: u64,
+        /// Подтверждает поддержку проверки содержимого при докачке.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
     },
     FileReject { id: u64, reason: String },
     /// Уведомление телефона (новое или обновлённое — по тому же `key`).
@@ -129,6 +135,8 @@ pub enum Message {
     VncResult { url: String, error: String },
     /// Телефон → ноутбук: закончить показ экрана.
     VncStop,
+    /// Получатель проверил SHA-256 и сохранил файл (None), либо сообщает ошибку.
+    FileResult { id: u64, error: Option<String> },
     #[serde(other)]
     Unknown,
 }
@@ -197,5 +205,19 @@ mod tests {
             .unwrap();
         let env = decode(&buf).unwrap();
         assert!(matches!(env.body, Message::Unknown));
+    }
+
+    #[test]
+    fn legacy_file_messages_decode_without_hash() {
+        for (tag, content) in [
+            ("file_offer", serde_json::json!({"id": 3, "name": "a", "size": 4, "mime": "text/plain"})),
+            ("file_accept", serde_json::json!({"id": 3, "offset": 2})),
+        ] {
+            let legacy = serde_json::json!({"id": 1, "body": {"t": tag, "c": content}});
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&legacy, &mut bytes).unwrap();
+            let body = decode(&bytes).unwrap().body;
+            assert!(matches!(body, Message::FileOffer { sha256: None, .. } | Message::FileAccept { sha256: None, .. }));
+        }
     }
 }

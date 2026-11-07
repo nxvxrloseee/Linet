@@ -210,7 +210,7 @@ impl LinetClient {
             caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into(), "handoff".into(), "unlock".into(), "vnc".into()],
         };
         let progress = listener.clone();
-        // Файл сначала ложится в кэш, потом копируется в «Загрузки»: нужен двойной запас места.
+        // Файл сначала ложится в приватный каталог, потом копируется в «Загрузки»: нужен двойной запас места.
         let transfers = Transfers::new(PathBuf::from(inbox_dir), 4 << 30, Arc::new(move |u| progress.on_transfer(u.into())));
         let client = Arc::new(Client::new(&PathBuf::from(data_dir), hello, transfers)?);
 

@@ -25,3 +25,6 @@ pub const PROTO_VERSION: u16 = 1;
 pub const ALPN: &[u8] = b"linet/1";
 /// Имя для SNI. Реальная проверка сервера — по отпечатку сертификата.
 pub const SERVER_NAME: &str = "linet";
+
+#[cfg(test)]
+mod test_support;

@@ -34,7 +34,8 @@ object Linet {
 
     private fun create(context: Context): LinetClient {
         val dir = File(context.filesDir, "linet").apply { mkdirs() }
-        val inbox = File(context.cacheDir, "incoming").apply { mkdirs() }
+        // Не кеш: при ошибке сохранения файл должен пережить очистку кеша системой.
+        val inbox = File(context.filesDir, "incoming").apply { mkdirs() }
         val client = LinetClient(dir.path, inbox.path, deviceName(context), Listener(context))
         _status.value = client.paired()?.let { Status.Offline(it, null) } ?: Status.NotPaired
         return client

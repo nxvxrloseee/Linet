@@ -10,7 +10,7 @@ use quinn::{Connection, Endpoint};
 use serde_bytes::ByteBuf;
 use tokio::sync::{Notify, mpsc};
 
-use crate::files::{SEND_ATTEMPTS, Transfers};
+use crate::files::{SEND_ATTEMPTS, TransferState, TransferUpdate, Transfers};
 use crate::identity::{Fingerprint, Identity};
 use crate::pairing::{self, Invite};
 use crate::proto::{Envelope, Hello, Message};
@@ -169,7 +169,6 @@ impl Client {
         &self.transfers
     }
 
-    /// Отправляет файл на ноутбук. Возвращает id передачи после доставки.
     /// Отправляет файл на ноутбук. Если связь рвётся посреди передачи, ждёт
     /// переподключения и продолжает с места обрыва (до `SEND_ATTEMPTS` раз).
     /// Возвращает id передачи после доставки.
@@ -182,23 +181,34 @@ impl Client {
         purpose: Option<&str>,
     ) -> Result<u64> {
         let id = self.transfers.new_id();
-        for attempt in 1..=SEND_ATTEMPTS {
-            let last = attempt == SEND_ATTEMPTS;
-            let session = self.wait_session(None).await.context("нет соединения с ноутбуком")?;
-            let reader = tokio::fs::File::from_std(file.try_clone()?);
-            match self.transfers.send(&session, id, reader, name, size, mime, purpose, last).await {
-                Ok(()) => return Ok(id),
-                // Сеанс жив — ошибка не от обрыва связи, повтор не поможет.
-                Err(e) if last || session.connection().close_reason().is_none() => return Err(e),
-                Err(e) => {
-                    tracing::info!(%name, attempt, "связь оборвалась, продолжу после переподключения: {e:#}");
-                    if self.wait_session(Some(&session)).await.is_none() {
-                        return Err(e);
+        let update = TransferUpdate {
+            id, peer: self.paired().map(|p| p.name).unwrap_or_default(), name: name.into(),
+            incoming: false, done: 0, total: size, purpose: purpose.map(Into::into),
+            state: TransferState::Progress,
+        };
+        let result = async {
+            for attempt in 1..=SEND_ATTEMPTS {
+                let last = attempt == SEND_ATTEMPTS;
+                let session = self.wait_session(None).await.context("нет соединения с ноутбуком")?;
+                let reader = tokio::fs::File::from_std(file.try_clone()?);
+                match self.transfers.send(&session, id, reader, name, size, mime, purpose).await {
+                    Ok(()) => return Ok(id),
+                    // Сеанс жив — ошибка не от обрыва связи, повтор не поможет.
+                    Err(e) if last || session.connection().close_reason().is_none() => return Err(e),
+                    Err(e) => {
+                        tracing::info!(%name, attempt, "связь оборвалась, продолжу после переподключения: {e:#}");
+                        if self.wait_session(Some(&session)).await.is_none() {
+                            return Err(e);
+                        }
                     }
                 }
             }
+            unreachable!("последняя попытка всегда возвращает результат")
+        }.await;
+        if let Err(error) = &result {
+            self.transfers.fail_outgoing(update, error);
         }
-        unreachable!("последняя попытка всегда возвращает результат")
+        result
     }
 
     /// Ждёт сеанс (новый, если передан старый) до `RESUME_WAIT`.
@@ -323,5 +333,67 @@ async fn wait_hint(peer: &PeerRecord) -> Option<SocketAddr> {
         if let Some(port) = crate::hint::verify(&buf[..n], *src.ip(), &cert, now_unix()) {
             return Some(SocketAddr::from((*src.ip(), port)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::files::TransferState;
+    use crate::proto::DeviceKind;
+    use crate::test_support::TestLink;
+
+    #[tokio::test]
+    async fn receiver_rejection_emits_one_terminal_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut link = TestLink::new().await;
+        let (tx, mut updates) = mpsc::unbounded_channel();
+        let transfers = Transfers::new(dir.path().join("inbox"), 1024, Arc::new(move |u| { let _ = tx.send(u); }));
+        let client = Client::new(dir.path(), Hello {
+            name: "phone".into(), kind: DeviceKind::Phone, proto: crate::PROTO_VERSION, caps: vec![],
+        }, transfers).unwrap();
+        *client.session.lock().unwrap() = Some(link.sender.clone());
+        let receiver = link.receiver.clone();
+        let mut events = link.receiver_events.take().unwrap();
+        let reject = tokio::spawn(async move {
+            let Some(Inbound::Message(env)) = events.recv().await else { panic!("нет предложения") };
+            let Message::FileOffer { id, .. } = env.body else { panic!("не FileOffer") };
+            receiver.reply(env.id, Message::FileReject { id, reason: "слишком большой файл".into() }).await.unwrap();
+        });
+        let path = dir.path().join("send.bin");
+        std::fs::write(&path, b"data").unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), client.send_file(
+            std::fs::File::open(path).unwrap(), "send.bin", 4, "application/octet-stream", None,
+        )).await.unwrap();
+        assert!(result.is_err());
+        reject.await.unwrap();
+        let mut failures = 0;
+        while let Ok(update) = updates.try_recv() {
+            match update.state {
+                TransferState::Failed(reason) => {
+                    assert!(reason.contains("слишком большой файл"));
+                    failures += 1;
+                }
+                TransferState::Done { .. } => panic!("отклонённая передача завершилась успешно"),
+                _ => {},
+            }
+        }
+        assert_eq!(failures, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_connection_emits_terminal_failure_after_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut updates) = mpsc::unbounded_channel();
+        let transfers = Transfers::new(dir.path().join("inbox"), 1024, Arc::new(move |u| { let _ = tx.send(u); }));
+        let client = Client::new(dir.path(), Hello {
+            name: "phone".into(), kind: DeviceKind::Phone, proto: crate::PROTO_VERSION, caps: vec![],
+        }, transfers).unwrap();
+        let path = dir.path().join("send.bin");
+        std::fs::write(&path, b"data").unwrap();
+        assert!(client.send_file(std::fs::File::open(path).unwrap(), "send.bin", 4, "application/octet-stream", None).await.is_err());
+        let update = updates.recv().await.unwrap();
+        assert!(matches!(update.state, TransferState::Failed(reason) if reason.contains("нет соединения")));
+        assert!(updates.try_recv().is_err());
     }
 }
