@@ -30,6 +30,7 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 /// Сколько ждать поток после принятого предложения.
 const OFFER_TTL: Duration = Duration::from_secs(60);
 const MAX_PENDING: usize = 64;
+const MAX_PEER_TRANSFERS: usize = 4;
 const RESULT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Недокачанные файлы старше этого удаляются.
 const PART_TTL: Duration = Duration::from_secs(48 * 3600);
@@ -71,6 +72,7 @@ struct Offer {
     sha256: Option<String>,
     active: bool,
     connection: quinn::Connection,
+    fingerprint: Fingerprint,
 }
 
 type TransferKey = (usize, u64);
@@ -155,7 +157,7 @@ impl Transfers {
         if pending.contains_key(&key) {
             return Message::FileReject { id, reason: "id передачи уже занят".into() };
         }
-        if pending.len() >= MAX_PENDING {
+        if pending.len() >= MAX_PENDING || pending.values().filter(|o| o.fingerprint == session.peer()).count() >= MAX_PEER_TRANSFERS {
             return Message::FileReject { id, reason: "слишком много передач сразу".into() };
         }
         prune_parts(&self.inbox, pending.values().map(|o| o.part.as_path()));
@@ -178,14 +180,14 @@ impl Transfers {
         tracing::info!(%peer, %name, size, offset, "входящий файл");
         pending.insert(key, Offer {
             name, size, peer, part, offset, purpose, accepted: Instant::now(),
-            sha256: sha256.clone(), active: false, connection: session.connection().clone(),
+            sha256: sha256.clone(), active: false, connection: session.connection().clone(), fingerprint: session.peer(),
         });
         Message::FileAccept { id, offset, sha256 }
     }
 
     async fn receive(&self, session: &Session, mut stream: RecvStream) -> Result<()> {
         let mut header = [0u8; 8];
-        stream.read_exact(&mut header).await?;
+        tokio::time::timeout(OFFER_TTL, stream.read_exact(&mut header)).await??;
         let id = u64::from_be_bytes(header);
         let key = (session.connection().stable_id(), id);
         let offer = {
@@ -256,7 +258,7 @@ impl Transfers {
         hash_into(&mut (&mut file).take(offer.offset), &mut hash).await?;
         file.seek(SeekFrom::Start(offer.offset)).await?;
         let mut last = Instant::now();
-        while let Some(chunk) = stream.read_chunk(CHUNK, true).await? {
+        while let Some(chunk) = tokio::time::timeout(OFFER_TTL, stream.read_chunk(CHUNK, true)).await?? {
             update.done += chunk.bytes.len() as u64;
             if update.done > update.total {
                 bail!("пришло больше заявленного размера");

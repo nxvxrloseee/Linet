@@ -1,8 +1,9 @@
 //! Значок в трее (StatusNotifierItem): заряд телефона и состояние связи.
-//! Caelestia (quickshell) показывает такие значки в своей панели.
+//! Регистрация восстанавливается при появлении/смене владельца watcher.
 
 use std::sync::{Arc, Mutex};
 
+use futures_util::StreamExt;
 use zbus::object_server::{InterfaceRef, SignalEmitter};
 use zbus::zvariant::OwnedObjectPath;
 
@@ -130,7 +131,25 @@ impl Tray {
             conn.object_server().at(PATH, item).await?;
             let name = format!("org.kde.StatusNotifierItem-{}-1", std::process::id());
             conn.request_name(name.as_str()).await?;
-            WatcherProxy::new(conn).await?.register_status_notifier_item(&name).await?;
+            let watcher = WatcherProxy::new(conn).await?;
+            let mut owners = watcher.inner().receive_owner_changed().await?;
+            if let Err(e) = watcher.register_status_notifier_item(&name).await {
+                tracing::debug!("watcher пока недоступен: {e}");
+            }
+            let registration_conn = conn.clone();
+            tokio::spawn(async move {
+                while let Some(owner) = owners.next().await {
+                    if owner.is_none() { continue; }
+                    match WatcherProxy::new(&registration_conn).await {
+                        Ok(watcher) => {
+                            if let Err(e) = watcher.register_status_notifier_item(&name).await {
+                                tracing::warn!("регистрация трея: {e}");
+                            }
+                        }
+                        Err(e) => tracing::warn!("watcher: {e}"),
+                    }
+                }
+            });
             conn.object_server().interface::<_, Item>(PATH).await
         }
         .await;
@@ -150,5 +169,35 @@ impl Tray {
             let _ = Item::new_icon(emitter).await;
             let _ = Item::new_tool_tip(emitter).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct MockWatcher(Arc<AtomicUsize>);
+    #[zbus::interface(name="org.kde.StatusNotifierWatcher")]
+    impl MockWatcher {
+        fn register_status_notifier_item(&self, _service: &str) { self.0.fetch_add(1, Ordering::SeqCst); }
+    }
+    #[tokio::test]
+    async fn late_watcher_and_replacement_register_without_restarting_tray() {
+        let bus = crate::test_bus::Bus::new();
+        let conn = bus.connect().await;
+        let tray = Tray::start(&conn, || {}).await;
+        assert!(tray.iface.is_some());
+        let first = bus.connect().await;
+        let first_count = Arc::new(AtomicUsize::new(0));
+        first.object_server().at("/StatusNotifierWatcher", MockWatcher(first_count.clone())).await.unwrap();
+        first.request_name("org.kde.StatusNotifierWatcher").await.unwrap();
+        crate::test_bus::eventually(|| first_count.load(Ordering::SeqCst) > 0).await;
+        first.release_name("org.kde.StatusNotifierWatcher").await.unwrap();
+        let second = bus.connect().await;
+        let second_count = Arc::new(AtomicUsize::new(0));
+        second.object_server().at("/StatusNotifierWatcher", MockWatcher(second_count.clone())).await.unwrap();
+        second.request_name("org.kde.StatusNotifierWatcher").await.unwrap();
+        crate::test_bus::eventually(|| second_count.load(Ordering::SeqCst) > 0).await;
+        assert_eq!(second_count.load(Ordering::SeqCst),1);
     }
 }

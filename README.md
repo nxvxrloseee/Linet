@@ -7,7 +7,7 @@
 - уведомления телефона на ноутбуке: кнопки, ответ, смахивание; фильтр по приложениям;
 - общий буфер обмена: текст и картинки;
 - Handoff: страница из браузера на телефон и обратно;
-- разблокировка ноутбука телефоном и автоблокировка, когда телефон ушёл;
+- автоблокировка, когда телефон ушёл; разблокировка телефоном для qylock — отдельный этап;
 - экран телефона на ноутбуке (scrcpy) и экран ноутбука или второй монитор на телефоне (wayvnc);
 - заряд телефона в трее, обновление приложения по сети.
 
@@ -28,16 +28,23 @@
 Нужны: `wl-clipboard`, `fuzzel`, `zenity`, `scrcpy`, `wayvnc`, `android-tools`.
 
 ```sh
-cargo install --path crates/linetd
-cargo install --path crates/linetctl      # linetctl и linet-nmh
-mkdir -p ~/.config/systemd/user && cp dist/linetd.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-scripts/install-desktop.sh                # пункты меню запуска и «Открыть с помощью»
+python3 scripts/install-user.py
+# Только Ryoku: собственные правила scrcpy и исключение виртуального output из UI
+python3 scripts/setup-ryoku.py
+bash scripts/install-ryoku-plugin.sh
 ```
 
-Демону нужно окружение Wayland, поэтому его запускает Hyprland: в автозапуск добавить
-`systemctl --user restart linetd`. Логи: `journalctl --user -u linetd -f`.
-Если включён файрвол: UDP 47321 (Linet), UDP 5353 (mDNS), TCP 5910 (VNC).
+Единый путь программ — `~/.local/bin`. Установщик обновляет systemd unit,
+ярлыки, Nautilus и native messaging; старые `~/.cargo/bin/linet*` становятся
+ссылками. На Ryoku демон запускается через `ryoku-session.target` после передачи
+Wayland-окружения. Его трей и уведомления восстанавливаются после смены сервера
+оболочки. Данные и сопряжения не мигрируются и не сбрасываются.
+Логи: `journalctl --user -u linetd -f`.
+
+Подробности, JSON API, установка плагина и адресный откат — в
+[docs/RYOKU.md](docs/RYOKU.md). Исходник плагина: `~/Documents/ryoku-plugins/linet`;
+в QS Bar Settings → Community доступен Linet. Правила firewall не меняются
+установщиком: локальной связи нужны UDP 47321, UDP 5353 (mDNS), TCP 5910 (VNC).
 
 ```sh
 linetctl pair                 # QR-код для телефона, затем «Сопрячь» в уведомлении
@@ -47,7 +54,8 @@ linetctl screen [--pick-app]  # экран телефона или прилож�
 linetctl open <url>           # открыть страницу на телефоне
 linetctl update-phone         # обновить приложение на телефоне
 linetctl stats                # подключения, трафик, память, разряд телефона
-linetctl unlock               # разблокировать экран телефоном
+linetctl lock-status          # Ryoku: состояние/capabilities блокировки (JSON)
+linetctl watch                # события состояния/батареи/передач, NDJSON
 ```
 
 ## Телефон

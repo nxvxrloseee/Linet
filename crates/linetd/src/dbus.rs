@@ -1,7 +1,8 @@
 //! D-Bus API демона на сессионной шине: `org.linet.Daemon`.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use crate::snapshot::History;
 
 use linet_core::files::{TransferState, TransferUpdate};
 use tokio::sync::mpsc;
@@ -20,6 +21,7 @@ pub const PATH: &str = "/org/linet/Daemon";
 pub struct Api {
     pub daemon: Arc<Daemon>,
     pub unlocker: Arc<Unlocker>,
+    history: Arc<Mutex<History>>,
 }
 
 fn err(e: anyhow::Error) -> fdo::Error {
@@ -32,6 +34,19 @@ impl Api {
     async fn devices(&self) -> Vec<(String, String, String, bool)> {
         self.daemon.devices().into_iter().map(|d| (d.id, d.name, d.kind, d.connected)).collect()
     }
+
+    /// JSON schema v1 for panels and event consumers. Legacy methods stay unchanged.
+    async fn snapshot_json(&self) -> String {
+        let devices: Vec<_> = self.daemon.devices().into_iter().map(|d| {
+            let battery = self.daemon.battery(&d.id).ok().flatten().map(|(level, charging)|
+                serde_json::json!({"level":level,"charging":charging}));
+            serde_json::json!({"id":d.id,"name":d.name,"kind":d.kind,"connected":d.connected,"battery":battery})
+        }).collect();
+        serde_json::json!({"schema_version":1,"available":true,"devices":devices,
+            "transfers":self.history.lock().unwrap().json()}).to_string()
+    }
+
+    async fn lock_status(&self) -> String { crate::unlock::status_json().await }
 
     /// (id, имя) этого компьютера
     async fn info(&self) -> (String, String) {
@@ -135,9 +150,10 @@ pub async fn serve(
     transfers: mpsc::UnboundedReceiver<TransferUpdate>,
 ) -> anyhow::Result<zbus::Connection> {
     let mut changes = daemon.subscribe();
+    let history: Arc<Mutex<History>> = Arc::default();
     let conn = zbus::connection::Builder::session()?
         .name(SERVICE)?
-        .serve_at(PATH, Api { daemon: daemon.clone(), unlocker })?
+        .serve_at(PATH, Api { daemon: daemon.clone(), unlocker, history: history.clone() })?
         .build()
         .await?;
     let iface = conn.object_server().interface::<_, Api>(PATH).await?;
@@ -171,7 +187,7 @@ pub async fn serve(
     })
     .await;
     daemon.set_tray(tray);
-    tokio::spawn(forward_transfers(iface, notifier, transfers));
+    tokio::spawn(forward_transfers(iface, notifier, transfers, history));
     Ok(conn)
 }
 
@@ -179,9 +195,11 @@ async fn forward_transfers(
     iface: InterfaceRef<Api>,
     notifier: Option<Notifier>,
     mut updates: mpsc::UnboundedReceiver<TransferUpdate>,
+    history: Arc<Mutex<History>>,
 ) {
     let emitter = iface.signal_emitter();
     while let Some(u) = updates.recv().await {
+        history.lock().unwrap().record(u.clone());
         let res = match &u.state {
             TransferState::Progress => {
                 Api::transfer_progress(emitter, u.id, &u.peer, &u.name, u.incoming, u.done, u.total).await
@@ -205,7 +223,7 @@ async fn forward_transfers(
     }
 }
 
-/// Уведомление о входящем файле: «Открыть» и «Папка».
+/// Network files are revealed in their folder, never launched from a notification.
 async fn notify_incoming(n: &Notifier, u: &TransferUpdate) {
     let summary = format!("Файл от {}", u.peer);
     let res = match &u.state {
@@ -216,14 +234,15 @@ async fn notify_incoming(n: &Notifier, u: &TransferUpdate) {
                 summary: &summary,
                 body: &u.name,
                 icon: "document-save",
-                actions: &[("default", "Открыть"), ("folder", "Папка")],
+                actions: &[("default", "Показать в папке")],
                 replaces: 0,
             };
             n.show(
                 notice,
                 Some(Box::new(move |event| match event {
-                    NoticeEvent::Action("folder") => xdg_open(path.parent().unwrap_or(&path)),
-                    NoticeEvent::Action(_) => xdg_open(&path),
+                    NoticeEvent::Action(_) => {
+                        if let Some(folder) = path.parent() { xdg_open(folder); }
+                    },
                     NoticeEvent::Closed(_) => {}
                 })),
             )

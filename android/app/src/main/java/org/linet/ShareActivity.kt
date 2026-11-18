@@ -1,13 +1,14 @@
 package org.linet
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.core.content.IntentCompat
 
-/** «Поделиться → Отправить на ноутбук». Без интерфейса: передаёт URI сервису и закрывается. */
+/** «Поделиться → Отправить на ноутбук»: файлы сервису, текст после подтверждения. */
 class ShareActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -21,15 +22,23 @@ class ShareActivity : Activity() {
         // Поделились текстом, а не файлом: ссылку открываем на ноутбуке, остальное — в его буфер.
         val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
         if (intent.action == Intent.ACTION_SEND && uris.isEmpty() && !text.isNullOrEmpty()) {
-            val url = Handoff.extractUrl(text)
-            if (url != null) {
-                val subject = intent.getStringExtra(Intent.EXTRA_SUBJECT)
-                    ?: text.trim().lines().takeIf { it.size == 2 }?.first().orEmpty()
-                Handoff.send(this, url, subject)
-            } else {
-                ClipboardSync.send(this, text)
-            }
-            finish()
+            // Exported SEND can be invoked explicitly by any app. Require a real
+            // user decision before changing the remote clipboard or opening a URL.
+            AlertDialog.Builder(this)
+                .setTitle("Отправить текст на ноутбук?")
+                .setMessage(text.take(500))
+                .setPositiveButton("Отправить") { _, _ ->
+                    val url = Handoff.extractUrl(text)
+                    if (url != null) {
+                        Handoff.send(this, url, intent.getStringExtra(Intent.EXTRA_SUBJECT).orEmpty())
+                    } else {
+                        ClipboardSync.send(this, text)
+                    }
+                    finish()
+                }
+                .setNegativeButton("Отмена") { _, _ -> finish() }
+                .setOnCancelListener { finish() }
+                .show()
             return
         }
         // Процесс мог только что запуститься: соединение ещё устанавливается, сервис его подождёт.

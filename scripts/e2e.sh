@@ -6,12 +6,13 @@
 # Настоящий демон, телефон и буфер обмена не затрагиваются; Hyprland — только
 # коротким захватом экрана для проверки VNC.
 set -uo pipefail
+umask 077
 cd "$(dirname "$0")/.."
 
 if [[ -z "${LINET_E2E_INNER:-}" ]]; then
-    export PATH="$HOME/.cargo/bin:$PATH"
+    export PATH="$HOME/.local/bin:$PATH"
     echo "Сборка…"
-    cargo build -q --release -p linetd -p linetctl -p linet-sim || exit 1
+    cargo build -q --release --locked -p linetd -p linetctl -p linet-sim || exit 1
     # Короткий путь: в нём будут unix-сокеты, а у них ограничение длины.
     W=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" linet-e2e.XXXX)
     trap 'rm -rf "$W"' EXIT
@@ -23,8 +24,9 @@ W=$LINET_E2E_DIR
 B=./target/release
 PORT=47397
 FAILS=0
-export HOME="$W/home" XDG_CONFIG_HOME="$W/home/.config"
-mkdir -p "$HOME"
+export XDG_CONFIG_HOME="$W/config"
+mkdir -p "$XDG_CONFIG_HOME" "$W/Downloads"
+printf 'XDG_DOWNLOAD_DIR="%s"\n' "$W/Downloads" > "$XDG_CONFIG_HOME/user-dirs.dirs"
 
 ok() { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 fail() { printf '  \033[31m✗\033[0m %s\n' "$1"; FAILS=$((FAILS + 1)); }
@@ -33,7 +35,9 @@ sha() { sha256sum "$1" | cut -d' ' -f1; }
 
 DAEMON=
 start_daemon() {
-    "$B/linetd" --data-dir "$W/laptop" --port $PORT --no-mdns --no-clipboard --no-unlock --no-autolock \
+    local vnc_args=()
+    [[ "${LINET_E2E_SKIP_VNC:-0}" == 1 ]] && vnc_args=(--no-vnc)
+    "$B/linetd" "${vnc_args[@]}" --data-dir "$W/laptop" --port $PORT --no-mdns --no-clipboard --no-unlock --no-autolock \
         >>"$W/daemon.log" 2>&1 &
     DAEMON=$!
     for _ in $(seq 1 50); do "$B/linetctl" stats >/dev/null 2>&1 && return 0; sleep 0.1; done
@@ -73,17 +77,28 @@ check "ping" sim ping
 echo "Файлы"
 head -c 50M /dev/urandom >"$W/f50.bin"
 sim send "$W/f50.bin" >/dev/null 2>&1
-check "телефон → ноутбук, 50 МБ, sha256" test "$(sha "$W/f50.bin")" = "$(sha "$HOME/Downloads/Linet/f50.bin" 2>/dev/null)"
+check "телефон → ноутбук, 50 МБ, sha256" test "$(sha "$W/f50.bin")" = "$(sha "$W/Downloads/Linet/f50.bin" 2>/dev/null)"
 
 head -c 300M /dev/urandom >"$W/f300.bin"
-timeout 0.8 "$B/linet-sim" --dir "$W/phone" send "$W/f300.bin" >/dev/null 2>&1
-part=$(find "$HOME/Downloads/Linet" -name '.linet-*.part' -printf '%s\n' 2>/dev/null | head -1)
+"$B/linet-sim" --dir "$W/phone" send "$W/f300.bin" >/dev/null 2>&1 &
+SENDER=$!
+for _ in $(seq 1 400); do
+    part=$(find "$W/Downloads/Linet" -name '.linet-*.part' -printf '%s\n' 2>/dev/null | head -1)
+    if [[ -n "$part" && "$part" -gt 0 && "$part" -lt 314572800 ]]; then
+        kill "$SENDER" 2>/dev/null
+        break
+    fi
+    kill -0 "$SENDER" 2>/dev/null || break
+    sleep 0.01
+done
+wait "$SENDER" 2>/dev/null
+part=$(find "$W/Downloads/Linet" -name '.linet-*.part' -printf '%s\n' 2>/dev/null | head -1)
 if [[ -n "$part" && "$part" -gt 0 ]]; then ok "обрыв оставил начало файла (${part} байт)"; else fail "после обрыва нет .part"; fi
 sim send "$W/f300.bin" >/dev/null 2>&1
-check "докачка 300 МБ, sha256 совпал" test "$(sha "$W/f300.bin")" = "$(sha "$HOME/Downloads/Linet/f300.bin" 2>/dev/null)"
+check "докачка 300 МБ, sha256 совпал" test "$(sha "$W/f300.bin")" = "$(sha "$W/Downloads/Linet/f300.bin" 2>/dev/null)"
 check "повтор начался с места обрыва" grep -qE "входящий файл.*f300.bin.*offset=[1-9]" "$W/daemon.log"
 
-sim run >"$W/sim-run.log" 2>&1 &
+"$B/linet-sim" --dir "$W/phone" --name e2e-phone run >"$W/sim-run.log" 2>&1 &
 SIM=$!
 for _ in $(seq 1 50); do "$B/linetctl" devices 2>/dev/null | grep -q "подключено" && break; sleep 0.1; done
 head -c 20M /dev/urandom >"$W/f20.bin"
@@ -91,8 +106,9 @@ head -c 20M /dev/urandom >"$W/f20.bin"
 check "ноутбук → телефон, 20 МБ, sha256" test "$(sha "$W/f20.bin")" = "$(sha "$W/phone/inbox/f20.bin" 2>/dev/null)"
 kill "$SIM" 2>/dev/null; wait "$SIM" 2>/dev/null
 
+if [[ "${LINET_E2E_SKIP_VNC:-0}" != 1 ]]; then
 echo "Экран ноутбука (VNC)"
-sim vnc --secs 3 >"$W/vnc.log" 2>&1 &
+"$B/linet-sim" --dir "$W/phone" --name e2e-phone vnc --secs 3 >"$W/vnc.log" 2>&1 &
 VSIM=$!
 sleep 2
 url=$(grep -oP 'url=\Kvnc://\S+' "$W/vnc.log")
@@ -104,6 +120,37 @@ else
     fail "ссылка VNC не выдана: $(grep -o 'error=.*' "$W/vnc.log")"
 fi
 wait "$VSIM" 2>/dev/null
+
+echo "Виртуальный монитор (Hyprland)"
+hyprctl monitors -j > "$W/monitors-before.json"
+"$B/linet-sim" --dir "$W/phone" --name e2e-phone vnc --extend --secs 5 >"$W/vnc-extend.log" 2>&1 &
+VSIM=$!
+sleep 2
+check "LINET-PHONE создан" python3 -c 'import json,subprocess; assert any(m["name"] == "LINET-PHONE" for m in json.loads(subprocess.check_output(["hyprctl","monitors","-j"])))'
+wait "$VSIM" 2>/dev/null
+sleep 1
+hyprctl monitors -j > "$W/monitors-after.json"
+check "после extend физические мониторы не изменились" python3 - "$W" <<'PYTHON'
+import json,sys
+from pathlib import Path
+root=Path(sys.argv[1])
+def state(name):
+    return {m["name"]: {k:m.get(k) for k in ["width","height","x","y","scale"]}
+            for m in json.loads((root/name).read_text()) if m["name"] != "LINET-PHONE"}
+assert state("monitors-before.json") == state("monitors-after.json")
+PYTHON
+check "extend убрал свой output" bash -c '! hyprctl monitors -j | grep -q LINET-PHONE'
+
+if [[ "${LINET_E2E_VNC_TIMEOUT:-0}" == 1 ]]; then
+    echo "VNC без клиента: ожидание штатного таймаута 60 с"
+    sim vnc --extend --secs 65 > "$W/vnc-timeout.log" 2>&1
+    check "таймаут клиента убрал output" bash -c '! hyprctl monitors -j | grep -q LINET-PHONE'
+    check "таймаут клиента зарегистрирован" grep -q "клиент VNC не подключился" "$W/daemon.log"
+fi
+
+else
+    echo "VNC: пропущен явно (LINET_E2E_SKIP_VNC=1)"
+fi
 
 echo "Память"
 sim spam-images 40 8 >/dev/null 2>&1
@@ -117,8 +164,11 @@ echo "Уборка"
 stop_daemon
 sleep 1
 # pgrep -f нашёл бы и саму эту строку проверки — ищем по имени процесса.
+if [[ "${LINET_E2E_SKIP_VNC:-0}" != 1 ]]; then
 check "wayvnc закрыт вместе с демоном" bash -c '! pgrep -a -x wayvnc | grep -q linet-wayvnc'
 check "виртуальный монитор не остался" bash -c '! hyprctl monitors 2>/dev/null | grep -q LINET-PHONE'
+
+fi
 
 echo
 if [[ $FAILS -eq 0 ]]; then echo "Всё в порядке."; else echo "Провалено проверок: $FAILS. Лог демона: оставлен ниже."; tail -20 "$W/daemon.log"; fi

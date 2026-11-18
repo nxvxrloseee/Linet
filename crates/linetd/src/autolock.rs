@@ -34,8 +34,8 @@ pub fn spawn(daemon: Arc<Daemon>) {
                     }
                     _ = tokio::time::sleep(PROBE_EVERY) => {}
                 }
-                // Экран уже заблокирован (например, по таймеру Caelestia) — проверять незачем.
-                if unlock::is_locked().await {
+                // Экран уже заблокирован (например, по таймеру Ryoku) — проверять незачем.
+                if unlock::state().await != unlock::LockState::Unlocked {
                     break;
                 }
                 let alive = match daemon.session_of(&phone) {

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use linet_core::{Message, Notification, Session};
@@ -15,17 +15,23 @@ const MAX_SHOWN: usize = 200;
 pub struct Mirror {
     notifier: Notifier,
     icons: PathBuf,
+    generation: AtomicU64,
     /// Ключ уведомления на телефоне → id уведомления на рабочем столе.
     shown: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl Mirror {
     pub fn new(notifier: Notifier, cache_dir: PathBuf) -> Arc<Self> {
-        Arc::new(Self { notifier, icons: cache_dir.join("icons"), shown: Arc::default() })
+        let generation = AtomicU64::new(notifier.generation());
+        Arc::new(Self { notifier, generation, icons: cache_dir.join("icons"), shown: Arc::default() })
     }
 
     /// Обрабатывает сообщение, если оно про уведомления; иначе возвращает его.
     pub async fn handle(&self, session: &Arc<Session>, msg: Message) -> Option<Message> {
+        let generation = self.notifier.generation();
+        if self.generation.swap(generation, Ordering::AcqRel) != generation {
+            self.shown.lock().unwrap().clear();
+        }
         match msg {
             Message::Notification(n) => self.show(session, n).await,
             Message::Handoff { url, title } => self.handoff(&session.hello().name, url, title).await,

@@ -99,18 +99,12 @@ impl PeerStore {
 /// Атомарная запись файла, читаемого только владельцем.
 pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     use std::io::Write;
-    let tmp = path.with_extension("tmp");
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut f = opts.open(&tmp).with_context(|| format!("запись {tmp:?}"))?;
-    f.write_all(data)?;
-    f.sync_all()?;
-    std::fs::rename(&tmp, path)?;
+    // Random, exclusively created sibling: no predictable symlink target,
+    // same filesystem for atomic replacement. NamedTempFile is 0600 on Unix.
+    let mut tmp = tempfile::NamedTempFile::new_in(path.parent().unwrap_or_else(|| Path::new(".")))?;
+    tmp.write_all(data)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).with_context(|| format!("запись {path:?}"))?;
     Ok(())
 }
 
@@ -119,4 +113,23 @@ pub fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(all(test, unix))]
+mod security_tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    #[test]
+    fn private_write_does_not_follow_predictable_temp_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"unchanged").unwrap();
+        let path = dir.path().join("peers.json");
+        symlink(&victim, path.with_extension("tmp")).unwrap();
+        write_private(&path, b"private").unwrap();
+        write_private(&path, b"updated").unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"unchanged");
+        assert_eq!(std::fs::read(&path).unwrap(), b"updated");
+        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
 }

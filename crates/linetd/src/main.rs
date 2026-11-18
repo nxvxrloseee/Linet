@@ -6,6 +6,7 @@ mod idle;
 mod mirror;
 mod netwatch;
 mod stats;
+mod snapshot;
 mod notify;
 mod tray;
 mod unlock;
@@ -110,11 +111,11 @@ fn tune_malloc() {
 
 fn main() -> Result<()> {
     tune_malloc();
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(WORKER_THREADS)
-        .enable_all()
-        .build()?
-        .block_on(run())
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(WORKER_THREADS).enable_all().build()?;
+    let result = runtime.block_on(run());
+    runtime.shutdown_timeout(std::time::Duration::from_secs(3));
+    result
 }
 
 async fn run() -> Result<()> {
@@ -136,7 +137,7 @@ async fn run() -> Result<()> {
         name: name.clone(),
         kind: DeviceKind::Laptop,
         proto: linet_core::PROTO_VERSION,
-        caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into(), "handoff".into(), "unlock".into(), "vnc".into()],
+        caps: vec!["ping".into(), "files".into(), "notifications".into(), "clipboard".into(), "handoff".into(), "vnc".into()],
     };
     let id = identity.fingerprint().device_id();
     let (updates_tx, updates_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -182,7 +183,7 @@ async fn run() -> Result<()> {
     };
     netwatch::NetWatch::new(daemon.clone(), args.port, mdns, dir.clone()).spawn();
 
-    let server = tokio::spawn(daemon.serve(endpoint.clone()));
+    let server = tokio::spawn(daemon.clone().serve(endpoint.clone()));
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
@@ -190,6 +191,12 @@ async fn run() -> Result<()> {
         _ = server => {}
     }
     endpoint.close(0u32.into(), b"shutdown");
-    endpoint.wait_idle().await;
+    daemon_shutdown(&daemon).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), endpoint.wait_idle()).await;
     Ok(())
 }
+
+async fn daemon_shutdown(daemon: &Arc<Daemon>) { daemon.stop_vnc().await; }
+
+#[cfg(test)]
+mod test_bus;

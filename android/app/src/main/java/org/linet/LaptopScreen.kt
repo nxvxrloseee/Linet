@@ -31,8 +31,14 @@ object LaptopScreen {
             Toast.makeText(activity, "Не вышло: ${it.message}", Toast.LENGTH_LONG).show()
             return
         }
+        val uri = Uri.parse(url.getOrThrow())
+        if (uri.scheme != "vnc" || uri.host.isNullOrBlank() || uri.userInfo != null) {
+            Linet.client(activity).stopVnc()
+            Toast.makeText(activity, "Некорректная ссылка VNC", Toast.LENGTH_LONG).show()
+            return
+        }
         try {
-            activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url.getOrThrow())))
+            activity.startActivity(Intent(Intent.ACTION_VIEW, uri))
         } catch (_: ActivityNotFoundException) {
             Linet.client(activity).stopVnc()
             Toast.makeText(activity, "Нужен VNC-клиент: установи AVNC", Toast.LENGTH_LONG).show()

@@ -334,7 +334,11 @@ impl LinetClient {
             std::time::Duration::from_secs(20),
         ))?;
         match reply {
-            Message::VncResult { url, error } if error.is_empty() => Ok(url),
+            Message::VncResult { url, error } if error.is_empty() => {
+                let result = validate_vnc_url(url);
+                if result.is_err() { self.stop_vnc(); }
+                result
+            },
             Message::VncResult { error, .. } => Err(LinetError::Failed(error)),
             other => Err(LinetError::Failed(format!("неожиданный ответ: {other:?}"))),
         }
@@ -371,5 +375,29 @@ impl LinetClient {
         let session = self.client.session().ok_or_else(|| LinetError::Failed("нет соединения".into()))?;
         let rtt = self.rt.block_on(session.ping())?;
         Ok(rtt.as_secs_f64() * 1000.0)
+    }
+}
+
+// Network-controlled replies must never become arbitrary Android deep links.
+fn validate_vnc_url(url: String) -> Result<String> {
+    if !url.starts_with("vnc://") || url.len() > 4096 || url.chars().any(char::is_control) {
+        return Err(LinetError::Failed("некорректная ссылка VNC".into()));
+    }
+    let authority = url[6..].split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') || authority.chars().any(char::is_whitespace) {
+        return Err(LinetError::Failed("некорректный адрес VNC".into()));
+    }
+    Ok(url)
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    #[test]
+    fn vnc_reply_cannot_launch_other_schemes() {
+        for url in ["intent://host", "file:///secret", "https://host", "vnc://", "vnc://host\n", "vnc://user@host"] {
+            assert!(validate_vnc_url(url.into()).is_err(), "{url:?}");
+        }
+        assert!(validate_vnc_url("vnc://192.168.1.2:5900?VncPassword=test".into()).is_ok());
     }
 }

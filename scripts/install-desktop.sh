@@ -1,21 +1,13 @@
 #!/usr/bin/env bash
-# Пункты «Отправить на телефон» в меню запуска, «Открыть с помощью» и сценариях Nautilus.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
-mkdir -p "$apps"
-LINETCTL="${LINETCTL:-$(command -v linetctl || echo "$HOME/.cargo/bin/linetctl")}"
-for f in dist/linet-*.desktop; do
-    sed "s|@LINETCTL@|$LINETCTL|" "$f" > "$apps/$(basename "$f")"
-done
-update-desktop-database "$apps" 2>/dev/null || true
-echo "Меню запуска и «Открыть с помощью»: $apps/linet-*.desktop"
-
-scripts="${XDG_DATA_HOME:-$HOME/.local/share}/nautilus/scripts"
-mkdir -p "$scripts"
-cat > "$scripts/Отправить на телефон" <<'SH'
-#!/bin/sh
-exec "$HOME/.cargo/bin/linetctl" send --notify "$@"
-SH
-chmod +x "$scripts/Отправить на телефон"
-echo "Nautilus, ПКМ → Сценарии: $scripts/Отправить на телефон"
+python3 - <<'PYTHON'
+import importlib.util, os
+from pathlib import Path
+spec=importlib.util.spec_from_file_location("install_user", "scripts/install-user.py")
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+home=Path.home()
+config=Path(os.environ.get("XDG_CONFIG_HOME", str(home/".config")))
+data=Path(os.environ.get("XDG_DATA_HOME", str(home/".local/share")))
+m.install_desktop(Path(os.environ.get("LINETCTL", str(home/".local/bin/linetctl"))),data)
+PYTHON

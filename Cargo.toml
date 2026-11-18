@@ -13,7 +13,7 @@ anyhow = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "signal", "io-util"] }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "logging"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 ring = "0.17"
 serde = { version = "1", features = ["derive"] }

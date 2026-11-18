@@ -53,7 +53,9 @@ impl Session {
             peer,
             hello,
         });
-        let (events_tx, events_rx) = mpsc::channel(64);
+        // Each message may contain a 12 MiB clipboard image. Keep the queue
+        // small so a paired peer cannot retain 64 such allocations (~1 GiB).
+        let (events_tx, events_rx) = mpsc::channel(2);
         let streams_conn = session.conn.clone();
         let streams_tx = events_tx.clone();
         tokio::spawn(async move {

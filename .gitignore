@@ -37,3 +37,7 @@ signing.properties
 *~
 .DS_Store
 Thumbs.db
+
+# Local Python installer/test caches
+__pycache__/
+*.py[cod]

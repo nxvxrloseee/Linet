@@ -70,7 +70,7 @@ async fn expired_full_queue_accepts_new_offers() {
     let dir = tempfile::tempdir().unwrap();
     let link = TestLink::new().await;
     let incoming = transfers(dir.path());
-    for id in 0..MAX_PENDING as u64 {
+    for id in 0..MAX_PEER_TRANSFERS as u64 {
         assert!(matches!(
             offer(&incoming, &link.receiver, id, &format!("f{id}"), b"data"),
             Message::FileAccept { .. }
@@ -125,7 +125,7 @@ async fn active_transfer_keeps_its_path_and_capacity_reserved() {
         .next()
         .unwrap()
         .accepted = Instant::now() - OFFER_TTL;
-    for id in 2..=MAX_PENDING as u64 {
+    for id in 2..=MAX_PEER_TRANSFERS as u64 {
         assert!(matches!(
             offer(&incoming, &link.receiver, id, &format!("f{id}"), b"data"),
             Message::FileAccept { .. }
@@ -496,4 +496,42 @@ async fn verified_file_survives_persistence_failure() {
     assert!(result.is_err());
     assert_eq!(std::fs::read(part).unwrap(), content);
     assert!(incoming.pending.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stalled_receive_releases_peer_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut link = TestLink::new().await;
+    let (incoming, mut updates) = observed(dir.path());
+    assert!(matches!(offer(&incoming, &link.receiver, 1, "idle.bin", b"data"), Message::FileAccept { .. }));
+    let mut stream = link.sender.connection().open_uni().await.unwrap();
+    stream.write_all(&1u64.to_be_bytes()).await.unwrap();
+    stream.write_all(b"d").await.unwrap();
+    let recv = receive_stream(link.receiver_events.as_mut().unwrap()).await;
+    let worker = {
+        let incoming = incoming.clone();
+        let session = link.receiver.clone();
+        tokio::spawn(async move { incoming.receive(&session, recv).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), updates.recv()).await.unwrap().unwrap();
+    // Progress is emitted before async file creation; wait for actual writes
+    // before advancing the clock so the idle-read timer has been installed.
+    let part = incoming.pending.lock().unwrap().values().next().unwrap().part.clone();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if std::fs::metadata(&part).is_ok_and(|m| m.len() == 1) { break; }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::time::pause();
+    tokio::time::advance(OFFER_TTL + Duration::from_secs(1)).await;
+    tokio::time::resume();
+    tokio::time::timeout(Duration::from_secs(5), worker).await.unwrap().unwrap().unwrap();
+    assert!(incoming.pending.lock().unwrap().is_empty());
+    let mut failed = false;
+    while let Ok(update) = updates.try_recv() {
+        failed |= matches!(update.state, TransferState::Failed(_));
+    }
+    assert!(failed);
 }

@@ -6,6 +6,10 @@
     default_path = "/org/linet/Daemon"
 )]
 pub trait Daemon {
+    fn snapshot_json(&self) -> zbus::Result<String>;
+    fn lock_status(&self) -> zbus::Result<String>;
+    #[zbus(signal)]
+    fn devices_changed(&self) -> zbus::Result<()>;
     fn devices(&self) -> zbus::Result<Vec<(String, String, String, bool)>>;
     fn info(&self) -> zbus::Result<(String, String)>;
     fn start_pairing(&self) -> zbus::Result<String>;

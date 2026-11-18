@@ -32,6 +32,8 @@ struct Running {
     child: Child,
     extend: bool,
     generation: u64,
+    config: PathBuf,
+    socket: PathBuf,
 }
 
 pub struct Vnc {
@@ -54,6 +56,18 @@ impl Vnc {
     /// Запускает wayvnc и возвращает ссылку `vnc://` для клиента на телефоне.
     pub async fn start(self: &Arc<Self>, phone: IpAddr, extend: bool, width: u32, height: u32) -> Result<String> {
         self.stop().await;
+        if crate::unlock::state().await != crate::unlock::LockState::Unlocked {
+            bail!("Ryoku: показ экрана запрещён при блокировке или неизвестном состоянии");
+        }
+        let result = self.start_inner(phone, extend, width, height).await;
+        if result.is_err() {
+            self.stop().await;
+            if extend { remove_headless().await; }
+        }
+        result
+    }
+
+    async fn start_inner(self: &Arc<Self>, phone: IpAddr, extend: bool, width: u32, height: u32) -> Result<String> {
         self.ensure_keys().await?;
         let local = local_ip_towards(phone)?;
         let password = random_password()?;
@@ -92,7 +106,7 @@ impl Vnc {
             .spawn()
             .context("нужен wayvnc: sudo pacman -S wayvnc")?;
         let generation = self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        *self.running.lock().await = Some(Running { child, extend, generation });
+        *self.running.lock().await = Some(Running { child, extend, generation, config, socket: socket.clone() });
 
         if let Err(e) = wait_listening(SocketAddr::new(local, PORT)).await {
             self.stop().await;
@@ -100,6 +114,7 @@ impl Vnc {
         }
         tracing::info!(%output, extend, "экран ноутбука открыт для телефона");
         self.clone().watch(socket, generation);
+        self.clone().guard(generation);
 
         Ok(format!(
             "vnc://{ip}:{PORT}?ConnectionName={name}&VncUsername=linet&VncPassword={password}",
@@ -108,12 +123,21 @@ impl Vnc {
         ))
     }
 
-    pub async fn stop(&self) {
-        let Some(mut run) = self.running.lock().await.take() else { return };
+    pub async fn stop(&self) { self.stop_generation(None).await; }
+
+    async fn stop_generation(&self, expected: Option<u64>) {
+        let run = {
+            let mut running = self.running.lock().await;
+            if expected.is_some_and(|g| !running.as_ref().is_some_and(|r| r.generation == g)) { return; }
+            running.take()
+        };
+        let Some(mut run) = run else { return };
         let _ = run.child.kill().await;
         if run.extend {
-            let _ = Command::new("hyprctl").args(["output", "remove", HEADLESS]).output().await;
+            remove_headless().await;
         }
+        let _ = tokio::fs::remove_file(run.config).await;
+        let _ = tokio::fs::remove_file(run.socket).await;
         tracing::info!("показ экрана ноутбука закончен");
     }
 
@@ -133,6 +157,7 @@ impl Vnc {
                 .spawn();
             let Ok(mut events) = events else {
                 tokio::time::sleep(CONNECT_TIMEOUT).await;
+                if still_ours(&self).await { self.stop_generation(Some(generation)).await; }
                 return;
             };
             let mut lines = tokio::io::BufReader::new(events.stdout.take().expect("stdout")).lines();
@@ -155,7 +180,39 @@ impl Vnc {
                 }
             }
             if still_ours(&self).await {
-                self.stop().await;
+                self.stop_generation(Some(generation)).await;
+            }
+        });
+    }
+
+    /// Fail closed while streaming. No lock subprocesses run when capture is inactive.
+    fn guard(self: Arc<Self>, generation: u64) {
+        let capture = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if !capture.running.lock().await.as_ref().is_some_and(|r| r.generation == generation) { break; }
+                if crate::unlock::state().await != crate::unlock::LockState::Unlocked {
+                    capture.stop_generation(Some(generation)).await;
+                    break;
+                }
+            }
+        });
+        tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let Ok(conn) = zbus::Connection::system().await else { return };
+            let Ok(login) = LoginManagerProxy::new(&conn).await else { return };
+            let Ok(mut events) = login.receive_prepare_for_sleep().await else { return };
+            loop {
+                let event = tokio::select! {
+                    event = events.next() => event,
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        if !self.running.lock().await.as_ref().is_some_and(|r| r.generation == generation) { break; }
+                        continue;
+                    }
+                };
+                let Some(event) = event else { break };
+                if event.args().is_ok_and(|a| a.start) { self.stop_generation(Some(generation)).await; break; }
             }
         });
     }
@@ -366,6 +423,20 @@ async fn wait_listening(addr: SocketAddr) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn stale_guard_cannot_stop_a_new_capture_generation() {
+        let dir = std::env::temp_dir().join(format!("linet-vnc-generation-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vnc = super::Vnc::new(&dir,"test".into());
+        let child = tokio::process::Command::new("sleep").arg("10").kill_on_drop(true).spawn().unwrap();
+        *vnc.running.lock().await = Some(super::Running { child, extend:false,generation:2,config:dir.join("config"),socket:dir.join("socket") });
+        vnc.stop_generation(Some(1)).await;
+        assert!(vnc.running.lock().await.is_some());
+        vnc.stop_generation(Some(2)).await;
+        assert!(vnc.running.lock().await.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn scale_fits_desktop_apps() {
         assert_eq!(super::pick_scale(2704, 1216), 1.6); // POCO X6 Pro → 1690×760
@@ -385,4 +456,14 @@ mod tests {
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+
+#[zbus::proxy(interface="org.freedesktop.login1.Manager", default_service="org.freedesktop.login1", default_path="/org/freedesktop/login1")]
+trait LoginManager {
+    #[zbus(signal)]
+    fn prepare_for_sleep(&self, start: bool) -> zbus::Result<()>;
+}
+
+async fn remove_headless() {
+    let _ = Command::new("hyprctl").args(["output", "remove", HEADLESS]).output().await;
 }

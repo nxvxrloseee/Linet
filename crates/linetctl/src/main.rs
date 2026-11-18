@@ -8,6 +8,7 @@ use qrcode::render::unicode::Dense1x2;
 use linetctl::DaemonProxy;
 
 mod screen;
+mod status;
 
 #[derive(Parser)]
 #[command(version, about = "Управление Linet")]
@@ -20,6 +21,12 @@ struct Args {
 enum Cmd {
     /// Сопряжённые устройства
     Devices,
+    /// Структурированный снимок состояния, JSON schema_version=1.
+    Snapshot,
+    /// Непрерывный поток снимков NDJSON, включая состояние недоступного демона.
+    Watch,
+    /// Возможности и состояние backend блокировки (JSON).
+    LockStatus,
     /// Сопряжение: показать QR-код для телефона
     Pair {
         /// Только вывести URI, без QR
@@ -90,9 +97,16 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let conn = zbus::Connection::session().await?;
     let daemon = DaemonProxy::new(&conn).await?;
+    match args.cmd {
+        Cmd::Snapshot => return status::once(&daemon).await,
+        Cmd::Watch => return status::watch(&daemon).await,
+        Cmd::LockStatus => { println!("{}", daemon.lock_status().await?); return Ok(()); },
+        _ => {},
+    }
     daemon.info().await.context("linetd не отвечает — он запущен?")?;
 
     match args.cmd {
+        Cmd::Snapshot | Cmd::Watch | Cmd::LockStatus => unreachable!(),
         Cmd::Devices => {
             let devices = daemon.devices().await?;
             if devices.is_empty() {

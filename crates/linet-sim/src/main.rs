@@ -91,6 +91,9 @@ async fn main() -> Result<()> {
                                 other => println!("ответ: {other:?}"),
                             }
                             tokio::time::sleep(std::time::Duration::from_secs(*secs)).await;
+                            session.send(linet_core::Message::VncStop).await?;
+                            session.ping().await?;
+                            session.close("VNC probe finished");
                             return Ok(());
                         }
                         if let Cmd::SpamImages { count, mb } = &args.cmd {

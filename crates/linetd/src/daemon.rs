@@ -120,6 +120,7 @@ impl Daemon {
 
     async fn on_battery(&self, session: &Session, level: u8, charging: bool) {
         let fp = session.peer();
+        let changed = self.battery(&fp.device_id()).ok().flatten() != Some((level, charging));
         let warn = {
             let mut map = self.battery.lock().unwrap();
             self.stats.battery(level, charging);
@@ -141,6 +142,7 @@ impl Daemon {
                 }
             }
         };
+        if changed { self.notify_changed(); }
         if let Some(tray) = self.tray.get() {
             tray.update(|t| t.battery = Some((level, charging))).await;
         }
@@ -156,6 +158,10 @@ impl Daemon {
             };
             let _ = n.show(notice, None).await;
         }
+    }
+
+    pub async fn stop_vnc(&self) {
+        if let Some(vnc) = self.vnc.get() { vnc.stop().await; }
     }
 
     pub fn set_vnc(&self, vnc: Arc<Vnc>) {
@@ -286,21 +292,6 @@ impl Daemon {
         let peer = self.find(id)?;
         let session = self.sessions.lock().unwrap().get(&peer.fingerprint).cloned();
         session.with_context(|| format!("{} не подключено", peer.name))
-    }
-
-    /// Ждёт подключения единственного устройства (например, после выхода из сна).
-    pub async fn wait_session(&self, timeout: Duration) -> Result<Arc<Session>> {
-        let deadline = Instant::now() + timeout;
-        let mut changes = self.subscribe();
-        loop {
-            if let Ok(s) = self.session("") {
-                return Ok(s);
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() || tokio::time::timeout(left, changes.changed()).await.is_err() {
-                return self.session("");
-            }
-        }
     }
 
     pub async fn send_url(&self, id: &str, url: &str, title: &str) -> Result<()> {

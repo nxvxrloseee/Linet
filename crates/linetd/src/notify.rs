@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures_util::StreamExt;
 use zbus::zvariant::Value;
@@ -62,9 +63,9 @@ pub struct Notice<'a> {
 #[derive(Clone)]
 pub struct Notifier {
     proxy: NotificationsProxy<'static>,
-    handlers: Arc<Mutex<HashMap<u32, Handler>>>,
+    handlers: Arc<Mutex<HashMap<u32, (String, Handler)>>>,
     /// Сервер разбирает разметку в теле — тогда текст нужно экранировать.
-    body_markup: bool,
+    generation: Arc<AtomicU64>,
 }
 
 /// Текст уведомлений приходит от чужих людей (имя и сообщение в мессенджере),
@@ -95,14 +96,16 @@ pub fn neutralize_plain(text: &str) -> String {
 impl Notifier {
     pub async fn new(conn: &zbus::Connection) -> zbus::Result<Self> {
         let proxy = NotificationsProxy::new(conn).await?;
-        let handlers: Arc<Mutex<HashMap<u32, Handler>>> = Arc::default();
+        let handlers: Arc<Mutex<HashMap<u32, (String, Handler)>>> = Arc::default();
 
         let mut invoked = proxy.receive_action_invoked().await?;
         let h = handlers.clone();
         tokio::spawn(async move {
             while let Some(sig) = invoked.next().await {
                 let Ok(args) = sig.args() else { continue };
-                if let Some(handler) = h.lock().unwrap().get(&args.id) {
+                if let Some((owner, handler)) = h.lock().unwrap().get(&args.id)
+                    && sig.message().header().sender().is_some_and(|sender| sender.as_str() == owner)
+                {
                     handler(NoticeEvent::Action(&args.action_key));
                 }
             }
@@ -112,29 +115,48 @@ impl Notifier {
         tokio::spawn(async move {
             while let Some(sig) = closed.next().await {
                 let Ok(args) = sig.args() else { continue };
-                let handler = h.lock().unwrap().remove(&args.id);
-                if let Some(handler) = handler {
+                let mut handlers = h.lock().unwrap();
+                let ours = handlers.get(&args.id).is_some_and(|(owner, _)|
+                    sig.message().header().sender().is_some_and(|sender| sender.as_str() == owner));
+                if ours && let Some((_, handler)) = handlers.remove(&args.id) {
                     handler(NoticeEvent::Closed(args.reason));
                 }
             }
         });
-        let body_markup = proxy.get_capabilities().await.is_ok_and(|caps| caps.iter().any(|c| c == "body-markup"));
-        Ok(Self { proxy, handlers, body_markup })
+        let generation = Arc::new(AtomicU64::new(0));
+        let mut owners = proxy.inner().receive_owner_changed().await?;
+        let h = handlers.clone();
+        let g = generation.clone();
+        tokio::spawn(async move {
+            while owners.next().await.is_some() {
+                h.lock().unwrap().clear();
+                g.fetch_add(1, Ordering::AcqRel);
+            }
+        });
+        Ok(Self { proxy, handlers, generation })
     }
 
+    pub fn generation(&self) -> u64 { self.generation.load(Ordering::Acquire) }
+
     pub async fn show(&self, notice: Notice<'_>, handler: Option<Handler>) -> zbus::Result<u32> {
+        let bus = zbus::fdo::DBusProxy::new(self.proxy.inner().connection()).await?;
+        let owner = bus.get_name_owner("org.freedesktop.Notifications".try_into()?).await?;
+        // Bind methods and callbacks to one server generation; reused ids are not interchangeable.
+        let proxy = NotificationsProxy::builder(self.proxy.inner().connection())
+            .destination(owner.clone())?.build().await?;
+        let body_markup = proxy.get_capabilities().await.is_ok_and(|caps| caps.iter().any(|c| c == "body-markup"));
         let actions: Vec<&str> = notice.actions.iter().flat_map(|(k, l)| [*k, *l]).collect();
         let mut hints = HashMap::new();
         if notice.app == "Linet" {
             hints.insert("desktop-entry", Value::from("linet"));
         }
-        let body = if self.body_markup { escape_body(notice.body) } else { notice.body.to_string() };
+        let body = if body_markup { escape_body(notice.body) } else { notice.body.to_string() };
         let (app, summary) = (neutralize_plain(notice.app), neutralize_plain(notice.summary));
-        let id = self.proxy.notify(&app, notice.replaces, notice.icon, &summary, &body, &actions, hints, -1).await?;
+        let id = proxy.notify(&app, notice.replaces, notice.icon, &summary, &body, &actions, hints, -1).await?;
         let mut handlers = self.handlers.lock().unwrap();
         match handler {
             Some(handler) => {
-                handlers.insert(id, handler);
+                handlers.insert(id, (owner.to_string(), handler));
                 // Caelestia хранит уведомления и не закрывает их, так что обработчики
                 // копились бы бесконечно. Старым кнопкам за таким пределом уже не до нажатий.
                 while handlers.len() > MAX_HANDLERS {
@@ -149,8 +171,13 @@ impl Notifier {
 
     /// Закрыть без вызова обработчика: закрытие инициировали мы, а не пользователь.
     pub async fn close(&self, id: u32) {
-        self.handlers.lock().unwrap().remove(&id);
-        let _ = self.proxy.close_notification(id).await;
+        let owner = self.handlers.lock().unwrap().remove(&id).map(|(owner, _)| owner);
+        if let Some(owner) = owner
+            && let Ok(builder) = NotificationsProxy::builder(self.proxy.inner().connection()).destination(owner)
+            && let Ok(proxy) = builder.build().await
+        {
+            let _ = proxy.close_notification(id).await;
+        }
     }
 }
 
@@ -212,5 +239,54 @@ mod tests {
     #[test]
     fn plain_has_no_tags() {
         assert_eq!(neutralize_plain("<b>Вася</b>"), "‹b›Вася‹/b›");
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct MockServer;
+    #[zbus::interface(name="org.freedesktop.Notifications")]
+    impl MockServer {
+        #[allow(clippy::too_many_arguments)]
+        fn notify(&self, _app: &str, _replaces: u32, _icon: &str, _summary: &str, _body: &str,
+            _actions: Vec<String>, _hints: HashMap<String,zbus::zvariant::OwnedValue>, _timeout: i32) -> u32 { 1 }
+        fn get_capabilities(&self) -> Vec<String> { vec!["actions".into(),"body-markup".into()] }
+        fn close_notification(&self, _id: u32) {}
+        #[zbus(signal)]
+        async fn action_invoked(emitter: &zbus::object_server::SignalEmitter<'_>, id: u32, action_key: &str) -> zbus::Result<()>;
+    }
+    async fn server(bus: &crate::test_bus::Bus) -> zbus::Connection {
+        let conn=bus.connect().await;
+        conn.object_server().at("/org/freedesktop/Notifications",MockServer).await.unwrap();
+        conn.request_name("org.freedesktop.Notifications").await.unwrap(); conn
+    }
+    fn notice() -> Notice<'static> {
+        Notice { app:"Linet", summary:"test", body:"test", icon:"",actions:&[("default","Open")],replaces:0 }
+    }
+    #[tokio::test]
+    async fn notification_callbacks_follow_server_generation_and_reused_ids_are_safe() {
+        let bus=crate::test_bus::Bus::new(); let conn=bus.connect().await;
+        let notifier=Notifier::new(&conn).await.unwrap();
+        let first=server(&bus).await;
+        crate::test_bus::eventually(|| notifier.generation()>0).await;
+        let old_actions=Arc::new(AtomicUsize::new(0)); let count=old_actions.clone();
+        notifier.show(notice(),Some(Box::new(move |_| {count.fetch_add(1,Ordering::SeqCst);}))).await.unwrap();
+        let generation=notifier.generation();
+        first.release_name("org.freedesktop.Notifications").await.unwrap();
+        crate::test_bus::eventually(|| notifier.generation()>generation).await;
+        assert!(notifier.handlers.lock().unwrap().is_empty());
+        let generation=notifier.generation(); let second=server(&bus).await;
+        crate::test_bus::eventually(|| notifier.generation()>generation).await;
+        let new_actions=Arc::new(AtomicUsize::new(0)); let count=new_actions.clone();
+        notifier.show(notice(),Some(Box::new(move |_| {count.fetch_add(1,Ordering::SeqCst);}))).await.unwrap();
+        let old=first.object_server().interface::<_,MockServer>("/org/freedesktop/Notifications").await.unwrap();
+        MockServer::action_invoked(old.signal_emitter(),1,"default").await.unwrap();
+        let new=second.object_server().interface::<_,MockServer>("/org/freedesktop/Notifications").await.unwrap();
+        MockServer::action_invoked(new.signal_emitter(),1,"default").await.unwrap();
+        crate::test_bus::eventually(|| new_actions.load(Ordering::SeqCst)>0).await;
+        assert_eq!(new_actions.load(Ordering::SeqCst),1);
+        assert_eq!(old_actions.load(Ordering::SeqCst),0);
     }
 }
